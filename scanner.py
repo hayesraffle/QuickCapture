@@ -124,9 +124,10 @@ class CameraThread:
     def _connect(self):
         """Try to connect to the camera. Returns camera object or None."""
         self._on_status("Connecting…")
-        subprocess.run(["killall","ptpcamerad","mscamerad","PTPCamera"],
+        # SIGKILL — macOS PTP daemons survive regular SIGTERM
+        subprocess.run(["killall", "-9", "ptpcamerad", "mscamerad", "PTPCamera"],
                        capture_output=True)
-        time.sleep(0.8)
+        time.sleep(1.5)
 
         try:
             cam = gp.Camera()
@@ -322,40 +323,38 @@ class ScannerApp:
         self._shutter_cv.place(relx=0.5, rely=0.5, anchor="center")
         self._shutter_cv.bind("<Button-1>", lambda e: self._do_capture())
 
-        # right side: prefix field, count, status
+        # right side: name field + status, vertically centered and right-aligned
         right = ctk.CTkFrame(controls, fg_color="transparent")
-        right.pack(side="right", padx=(0, 14))
+        right.pack(side="right", padx=(0, 16), fill="y")
 
-        # status
-        self._status_label = ctk.CTkLabel(
-            right, text="",
-            font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
-        )
-        self._status_label.pack(side="bottom", pady=(0, 2))
+        # vertical centering wrapper
+        spacer_top = ctk.CTkFrame(right, fg_color="transparent")
+        spacer_top.pack(expand=True)
 
-        # photo count
-        self._count_label = ctk.CTkLabel(
-            right, text="",
-            font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
-        )
-        self._count_label.pack(side="bottom", pady=0)
-
-        # filename prefix
-        prefix_row = ctk.CTkFrame(right, fg_color="transparent")
-        prefix_row.pack(side="bottom", pady=(0, 2))
+        name_row = ctk.CTkFrame(right, fg_color="transparent")
+        name_row.pack()
 
         ctk.CTkLabel(
-            prefix_row, text="Prefix:",
-            font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
-        ).pack(side="left", padx=(0, 4))
+            name_row, text="Name:",
+            font=ctk.CTkFont(size=12), text_color=TEXT_DIM,
+        ).pack(side="left", padx=(0, 6))
 
         self._prefix_var = tk.StringVar(value="scan")
         self._prefix_entry = ctk.CTkEntry(
-            prefix_row, textvariable=self._prefix_var,
-            width=100, height=24, font=ctk.CTkFont(size=11),
+            name_row, textvariable=self._prefix_var,
+            width=180, height=28, font=ctk.CTkFont(size=12),
             fg_color=SURFACE2, border_color=DIVIDER, text_color=TEXT_BRIGHT,
         )
         self._prefix_entry.pack(side="left")
+
+        self._status_label = ctk.CTkLabel(
+            right, text="",
+            font=ctk.CTkFont(size=10), text_color=TEXT_DIM,
+        )
+        self._status_label.pack(pady=(2, 0))
+
+        spacer_bot = ctk.CTkFrame(right, fg_color="transparent")
+        spacer_bot.pack(expand=True)
 
         # ── divider ──
         ctk.CTkFrame(self.root, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x")
@@ -410,8 +409,6 @@ class ScannerApp:
 
     def _file_received(self, path):
         self.capture_count += 1
-        n = self.capture_count
-        self._count_label.configure(text=f"{n} photo{'s' if n != 1 else ''}")
         self._add_thumb(path)
 
     def _set_status(self, msg):
@@ -424,7 +421,7 @@ class ScannerApp:
 
     def _toggle_zoom(self):
         self.zoomed = not self.zoomed
-        self._zoom_img = ctk.CTkImage(zoom_icon(self.zoomed), size=(36, 36))
+        self._zoom_img = ctk.CTkImage(zoom_icon(self.zoomed), size=(32, 32))
         self._zoom_btn.configure(
             image=self._zoom_img,
             text="5x" if self.zoomed else "Zoom",
@@ -435,10 +432,19 @@ class ScannerApp:
         want_zoom = self.zoomed
 
         def zoom_job(cam):
+            # eoszoom: "1" = normal, "5" = 5x magnified center crop
+            # try string first (most common), fall back to int
             cfg = cam.get_config()
             ez = cfg.get_child_by_name("eoszoom")
-            ez.set_value("5" if want_zoom else "1")
-            cam.set_single_config("eoszoom", ez)
+            val = "5" if want_zoom else "1"
+            try:
+                ez.set_value(val)
+                cam.set_single_config("eoszoom", ez)
+            except gp.GPhoto2Error:
+                cfg = cam.get_config()
+                ez = cfg.get_child_by_name("eoszoom")
+                ez.set_value(int(val))
+                cam.set_single_config("eoszoom", ez)
             time.sleep(0.3)
 
         def after():
@@ -455,7 +461,7 @@ class ScannerApp:
 
     def _toggle_flash(self):
         self.flash_on = not self.flash_on
-        self._flash_img = ctk.CTkImage(flash_icon(self.flash_on), size=(36, 36))
+        self._flash_img = ctk.CTkImage(flash_icon(self.flash_on), size=(32, 32))
         self._flash_btn.configure(
             image=self._flash_img,
             text_color=YELLOW if self.flash_on else TEXT_DIM,
@@ -485,7 +491,7 @@ class ScannerApp:
     # ── autofocus ─────────────────────────────────────────────────────────────
 
     def _do_af(self):
-        self._af_img = ctk.CTkImage(af_icon(True), size=(36, 36))
+        self._af_img = ctk.CTkImage(af_icon(True), size=(32, 32))
         self._af_btn.configure(image=self._af_img, text_color=BLUE)
         self._set_status("Focusing…")
 
@@ -504,7 +510,7 @@ class ScannerApp:
             time.sleep(2.0)  # give lens time to seek and lock
 
         def after():
-            self._af_img = ctk.CTkImage(af_icon(False), size=(36, 36))
+            self._af_img = ctk.CTkImage(af_icon(False), size=(32, 32))
             self._af_btn.configure(image=self._af_img, text_color=TEXT_DIM)
             self._set_status("Ready")
 
@@ -600,5 +606,12 @@ class ScannerApp:
 
 
 if __name__ == "__main__":
+    import fcntl, sys
+    lockfile = open("/tmp/scanner_app.lock", "w")
+    try:
+        fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("Scanner is already running.")
+        sys.exit(0)
     app = ScannerApp()
     app.run()

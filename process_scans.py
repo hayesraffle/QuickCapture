@@ -9,7 +9,7 @@ JPEGs (newest first). You can also drag more scans into the browser window.
 Crops are saved to  scan_folder/processed/  (or output/ if no folder given).
 """
 
-import sys, json, io, threading, webbrowser, email, email.policy, socket, tempfile, os
+import sys, json, io, threading, webbrowser, email, email.policy, socket, tempfile, os, time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -286,6 +286,16 @@ body {
   50%      { background: #282828; }
 }
 
+/* ── Rotate ── */
+.rot-btn {
+  display: none; position: absolute; top: 6px; left: 6px;
+  background: rgba(60,60,60,0.9); color: #fff; border: none;
+  border-radius: 50%; width: 22px; height: 22px;
+  font-size: 13px; cursor: pointer; line-height: 22px; padding: 0; z-index: 2;
+}
+.card:hover .rot-btn { display: block; }
+.rot-btn:hover { background: rgba(90,90,90,0.95); }
+
 /* ── Delete ── */
 .del-btn {
   display: none; position: absolute; top: 6px; right: 6px;
@@ -319,6 +329,24 @@ body {
 }
 #reset-btn:hover { border-color: #900; color: #c44; }
 body.has-photos #reset-btn { display: block; }
+#quit-btn {
+  position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+  background: none; border: 1px solid #333; color: #555;
+  padding: 6px 14px; border-radius: 20px; font-size: 13px;
+  cursor: pointer; transition: border-color 0.2s, color 0.2s;
+}
+#quit-btn:hover { border-color: #888; color: #aaa; }
+
+/* ── Lightbox ── */
+#lightbox {
+  display: none; position: fixed; inset: 0; z-index: 100;
+  background: rgba(0,0,0,0.88); align-items: center; justify-content: center;
+  cursor: zoom-out;
+}
+#lightbox.open { display: flex; }
+#lightbox img {
+  max-width: 92vw; max-height: 92vh; object-fit: contain; border-radius: 6px;
+}
 </style>
 </head>
 <body>
@@ -328,9 +356,11 @@ body.has-photos #reset-btn { display: block; }
   <p>JPG &middot; PNG &middot; TIFF &nbsp;&mdash;&nbsp; splits multi-photo scans automatically</p>
 </div>
 <button id="reset-btn" onclick="resetAll()">Start over</button>
+<button id="quit-btn" onclick="doQuit()">Quit</button>
 
 <div id="grid"></div>
 <div id="status">ready</div>
+<div id="lightbox" onclick="closeLightbox()"><img></div>
 
 <script>
 const STATE = /*INJECT_STATE*/null/*END*/;
@@ -417,16 +447,31 @@ function addCard(i, r) {
   const card = document.createElement('div');
   card.className = 'card'; card.id = 'card-' + i;
   card.innerHTML =
-    '<div class="img-box" onclick="rotate(' + i + ')">' +
+    '<div class="img-box" onclick="openLightbox(' + i + ')">' +
       '<img src="/thumb/' + i + '?rot=' + (r.rotation||0) + '" loading="lazy" alt="' + escHtml(r.name) + '">' +
     '</div>' +
     '<div class="label">' + escHtml(r.name) + '</div>' +
+    '<button class="rot-btn" onclick="event.stopPropagation();rotate(' + i + ')" title="Rotate">&#x21ba;</button>' +
     '<button class="del-btn" onclick="showDel(event,' + i + ')">&#x2715;</button>' +
     '<div class="del-confirm" id="dc-' + i + '" onclick="doDelete(' + i + ')">Delete?</div>';
   document.getElementById('grid').appendChild(card);
 }
 
 function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+
+// ── Lightbox ─────────────────────────────────────────────────────────────────
+function openLightbox(i) {
+  const lb = document.getElementById('lightbox');
+  const img = lb.querySelector('img');
+  img.src = '/thumb/' + i + '?rot=' + (results[i].rotation||0) + '&full=1&t=' + Date.now();
+  lb.classList.add('open');
+}
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('open');
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeLightbox();
+});
 
 // ── Rotate ───────────────────────────────────────────────────────────────────
 function rotate(i) {
@@ -486,6 +531,11 @@ document.addEventListener('click', () =>
 // ── Util ─────────────────────────────────────────────────────────────────────
 function setStatus(t, c) { const s = document.getElementById('status'); s.textContent = t; s.className = c; }
 function showNote(msg) { setStatus(msg, ''); setTimeout(() => setStatus('ready', ''), 4000); }
+new EventSource('/heartbeat');
+function doQuit() {
+  fetch('/quit', { method: 'POST' }).catch(() => {});
+  document.body.innerHTML = '<p style="text-align:center;margin-top:40vh;color:#666">Server stopped.</p>';
+}
 </script>
 </body>
 </html>"""
@@ -531,6 +581,23 @@ class Handler(BaseHTTPRequestHandler):
             data  = html.encode()
             self._respond(200, "text/html; charset=utf-8", data)
 
+        elif parsed.path == "/heartbeat":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            self.server.sse_clients.add(self)
+            try:
+                while True:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    time.sleep(15)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                self.server.sse_clients.discard(self)
+
         elif parsed.path.startswith("/thumb/"):
             idx = int(parsed.path.split("/")[-1])
             if idx >= len(STATE.results):
@@ -538,14 +605,18 @@ class Handler(BaseHTTPRequestHandler):
             r = STATE.results[idx]
             if r.get("deleted") or not Path(r["path"]).exists():
                 self.send_error(404); return
-            qs  = parse_qs(parsed.query)
-            rot = int(qs.get("rot", ["0"])[0])
-            img = Image.open(r["path"])
+            qs   = parse_qs(parsed.query)
+            rot  = int(qs.get("rot", ["0"])[0])
+            full = qs.get("full", ["0"])[0] == "1"
+            img  = Image.open(r["path"])
             if rot:
                 img = img.rotate(-rot, expand=True)
-            img.thumbnail(THUMB_SIZE, Image.LANCZOS)
+            if not full:
+                img.thumbnail(THUMB_SIZE, Image.LANCZOS)
+            else:
+                img.thumbnail((1800, 1800), Image.LANCZOS)
             buf = io.BytesIO()
-            img.save(buf, "JPEG", quality=82)
+            img.save(buf, "JPEG", quality=85 if full else 82)
             self._respond(200, "image/jpeg", buf.getvalue())
 
         else:
@@ -604,6 +675,10 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.persist()
             self._respond(200, "text/plain", b"ok")
 
+        elif self.path == "/quit":
+            self._respond(200, "text/plain", b"bye")
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+
         else:
             self.send_error(404)
 
@@ -642,11 +717,25 @@ def main(scan_dir=None):
     print(f"Output folder   →  {OUTPUT_DIR}")
     print("Ctrl-C to quit\n")
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    server.sse_clients = set()
+
+    def watchdog():
+        # Give the browser time to connect initially
+        time.sleep(15)
+        while True:
+            time.sleep(5)
+            if not server.sse_clients:
+                print("\nNo browser connected — shutting down.")
+                server.shutdown()
+                return
+
+    threading.Thread(target=watchdog, daemon=True).start()
     threading.Timer(0.6, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}/")).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopped.")
+        pass
+    print("Stopped.")
 
 if __name__ == "__main__":
     folder = sys.argv[1] if len(sys.argv) > 1 else None

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Scanner — modern tethered capture for Canon EOS 1100D
+QuickCapture — modern tethered capture for Canon EOS 1100D
 Single camera thread with command queue (darktable-style architecture)
 """
 
@@ -275,7 +275,7 @@ class CameraThread:
 
 # ── app ───────────────────────────────────────────────────────────────────────
 
-class ScannerApp:
+class QuickCaptureApp:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title("QuickCapture")
@@ -649,13 +649,13 @@ class ScannerApp:
 
 if __name__ == "__main__":
     import fcntl, sys, atexit, signal
-    lockfile = open("/tmp/scanner_app.lock", "w")
+    lockfile = open("/tmp/quickcapture.lock", "w")
     try:
         fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        print("Scanner is already running.")
+        print("QuickCapture is already running.")
         sys.exit(0)
-    app = ScannerApp()
+    app = QuickCaptureApp()
 
     def _cleanup(*_):
         if app._cam:

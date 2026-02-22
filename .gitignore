@@ -4,4 +4,3 @@ Scans/
 .venv/
 build/
 dist/
-*.spec

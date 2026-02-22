@@ -1,3 +1,3 @@
 #!/bin/bash
 cd "$(dirname "$0")"
-python3 quickcapture.py
+.venv/bin/python quickcapture.py

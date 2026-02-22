@@ -624,19 +624,16 @@ class QuickCaptureApp:
         try:
             img  = Image.open(path)
             w, h = img.size
-            tw   = int(h * 3/2)
-            if tw < w:
-                left = (w - tw) // 2
-                img = img.crop((left, 0, left + tw, h))
-            img = img.resize((THUMB_W, THUMB_H), Image.LANCZOS)
+            thumb_w = max(1, int(THUMB_H * w / h))
+            img = img.resize((thumb_w, THUMB_H), Image.LANCZOS)
 
             # rounded corners
-            mask = Image.new("L", (THUMB_W, THUMB_H), 0)
+            mask = Image.new("L", (thumb_w, THUMB_H), 0)
             ImageDraw.Draw(mask).rounded_rectangle(
-                [0, 0, THUMB_W-1, THUMB_H-1], radius=10, fill=255)
+                [0, 0, thumb_w-1, THUMB_H-1], radius=10, fill=255)
             img.putalpha(mask)
 
-            photo = ctk.CTkImage(img, size=(THUMB_W, THUMB_H))
+            photo = ctk.CTkImage(img, size=(thumb_w, THUMB_H))
             self._thumb_refs.append(photo)
 
             lbl = ctk.CTkLabel(self._roll_scroll, image=photo, text="",

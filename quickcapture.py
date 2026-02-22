@@ -13,7 +13,7 @@ from PIL.Image import Exif
 
 import gphoto2 as gp
 
-SAVE_DIR  = Path.home() / "Desktop" / "Scans"
+SAVE_DIR  = Path.home() / "Pictures" / "QuickCapture"
 THUMB_W   = 100
 THUMB_H   = 74
 
@@ -320,6 +320,7 @@ class QuickCaptureApp:
         self.root.destroy()
 
     def _on_done(self):
+        SAVE_DIR.mkdir(parents=True, exist_ok=True)
         script = Path(__file__).parent / "process_scans.py"
         subprocess.Popen(
             [sys.executable, str(script), str(SAVE_DIR)],

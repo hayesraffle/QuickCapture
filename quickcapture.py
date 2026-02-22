@@ -278,7 +278,7 @@ class CameraThread:
 class ScannerApp:
     def __init__(self):
         self.root = ctk.CTk()
-        self.root.title("Scanner")
+        self.root.title("QuickCapture")
         self.root.configure(fg_color=BG)
         self.root.resizable(True, True)
         self.root.geometry("1100x820")

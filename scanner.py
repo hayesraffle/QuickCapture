@@ -68,36 +68,21 @@ def af_icon(active, size=36):
         d.ellipse([cx-2*sc, cx-2*sc, cx+2*sc, cx+2*sc], fill=c)
     return _hq(size, draw)
 
-def zoom_icon(is_1to1, size=36):
+def zoom_icon(zoomed, size=36):
     def draw(d, s, sc):
-        d.ellipse([0, 0, s-1, s-1], fill=ICON_BG)
+        d.ellipse([0, 0, s-1, s-1], fill=GREEN if zoomed else ICON_BG)
         c = "#ffffff"
         cx, cy = s // 2, s // 2
-        if is_1to1:
-            # "1:1" text approximation — two vertical bars with colon
-            bw, bh = 2*sc, 10*sc
-            d.rectangle([cx - 5*sc, cy - bh//2, cx - 5*sc + bw, cy + bh//2], fill=c)
-            d.rectangle([cx + 3*sc, cy - bh//2, cx + 3*sc + bw, cy + bh//2], fill=c)
-            dot = 1*sc
-            d.ellipse([cx - dot, cy - 3*sc - dot, cx + dot, cy - 3*sc + dot], fill=c)
-            d.ellipse([cx - dot, cy + 3*sc - dot, cx + dot, cy + 3*sc + dot], fill=c)
-        else:
-            # "fit" — four inward arrows
-            a = 5*sc
-            m = 8*sc
-            t = 2*sc
-            # top-left corner arrow
-            d.line([(m, m), (m + a, m)], fill=c, width=t)
-            d.line([(m, m), (m, m + a)], fill=c, width=t)
-            # top-right
-            d.line([(s-m, m), (s-m-a, m)], fill=c, width=t)
-            d.line([(s-m, m), (s-m, m+a)], fill=c, width=t)
-            # bottom-left
-            d.line([(m, s-m), (m+a, s-m)], fill=c, width=t)
-            d.line([(m, s-m), (m, s-m-a)], fill=c, width=t)
-            # bottom-right
-            d.line([(s-m, s-m), (s-m-a, s-m)], fill=c, width=t)
-            d.line([(s-m, s-m), (s-m, s-m-a)], fill=c, width=t)
+        # magnifying glass
+        r = 6 * sc
+        d.ellipse([cx - r, cy - r - 2*sc, cx + r, cy + r - 2*sc], outline=c, width=2*sc)
+        # handle
+        d.line([(cx + 4*sc, cy + 4*sc - 2*sc), (cx + 8*sc, cy + 8*sc - 2*sc)],
+               fill=c, width=3*sc)
+        if zoomed:
+            # "+" inside lens
+            d.line([(cx - 3*sc, cy - 2*sc), (cx + 3*sc, cy - 2*sc)], fill=c, width=2*sc)
+            d.line([(cx, cy - 5*sc), (cx, cy + 1*sc)], fill=c, width=2*sc)
     return _hq(size, draw)
 
 def shutter_ring(size=80, pressed=False):
@@ -112,11 +97,12 @@ def shutter_ring(size=80, pressed=False):
 # ── camera thread ─────────────────────────────────────────────────────────────
 
 class CameraThread:
-    def __init__(self, on_frame, on_file, on_status, on_disconnect):
+    def __init__(self, on_frame, on_file, on_status, on_disconnect, get_prefix):
         self._on_frame      = on_frame
         self._on_file       = on_file
         self._on_status     = on_status
         self._on_disconnect = on_disconnect
+        self._get_prefix    = get_prefix
         self._q             = queue.Queue()
         self._running       = True
         threading.Thread(target=self._loop, daemon=True).start()
@@ -212,7 +198,8 @@ class CameraThread:
                                                   gp.GP_FILE_TYPE_NORMAL)
                             ts   = time.strftime("%Y-%m-%d_%H-%M-%S")
                             ext  = Path(ed.name).suffix
-                            dest = SAVE_DIR / f"scan_{ts}{ext}"
+                            pfx  = self._get_prefix()
+                            dest = SAVE_DIR / f"{pfx}_{ts}{ext}"
                             cf.save(str(dest))
                             self._on_file(dest)
                     except Exception:
@@ -245,82 +232,33 @@ class ScannerApp:
 
         self.capture_count = 0
         self.flash_on      = False
-        self.zoom_1to1     = False   # False = fit, True = 1:1
+        self.zoomed        = False   # False = normal, True = 5x sensor zoom
         self._raw_frame    = None    # latest raw PIL frame from camera
         self._thumb_refs   = []
         self._ui_refs      = {}
         self._cam          = None
 
         self._build_ui()
+        self.root.bind("<space>", lambda e: self._do_capture()
+                       if not isinstance(e.widget, ctk.CTkEntry) else None)
         SAVE_DIR.mkdir(parents=True, exist_ok=True)
         self._cam = CameraThread(
             on_frame      = self._on_frame,
             on_file       = self._on_file,
             on_status     = self._set_status,
             on_disconnect = self._on_disconnect,
+            get_prefix    = self._get_prefix,
         )
 
     def run(self):
         self.root.mainloop()
 
+    def _get_prefix(self):
+        return self._prefix_var.get().strip() or "scan"
+
     # ── build UI ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ── toolbar ──
-        toolbar = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=60)
-        toolbar.pack(fill="x")
-        toolbar.pack_propagate(False)
-
-        # flash button
-        self._flash_img = ctk.CTkImage(flash_icon(False), size=(36, 36))
-        self._flash_btn = ctk.CTkButton(
-            toolbar, image=self._flash_img, text="Flash",
-            font=ctk.CTkFont(size=10), text_color=TEXT_DIM,
-            fg_color="transparent", hover_color=SURFACE2,
-            width=56, height=52, compound="top",
-            command=self._toggle_flash,
-        )
-        self._flash_btn.pack(side="left", padx=(12, 2), pady=4)
-
-        # AF button
-        self._af_img = ctk.CTkImage(af_icon(False), size=(36, 36))
-        self._af_btn = ctk.CTkButton(
-            toolbar, image=self._af_img, text="Focus",
-            font=ctk.CTkFont(size=10), text_color=TEXT_DIM,
-            fg_color="transparent", hover_color=SURFACE2,
-            width=56, height=52, compound="top",
-            command=self._do_af,
-        )
-        self._af_btn.pack(side="left", padx=2, pady=4)
-
-        # zoom toggle button
-        self._zoom_img = ctk.CTkImage(zoom_icon(False), size=(36, 36))
-        self._zoom_btn = ctk.CTkButton(
-            toolbar, image=self._zoom_img, text="Fit",
-            font=ctk.CTkFont(size=10), text_color=TEXT_DIM,
-            fg_color="transparent", hover_color=SURFACE2,
-            width=56, height=52, compound="top",
-            command=self._toggle_zoom,
-        )
-        self._zoom_btn.pack(side="left", padx=2, pady=4)
-
-        # title
-        ctk.CTkLabel(
-            toolbar, text="Scanner",
-            font=ctk.CTkFont(family="SF Pro Display", size=18, weight="bold"),
-            text_color=TEXT_BRIGHT,
-        ).place(relx=0.5, rely=0.4, anchor="center")
-
-        # status
-        self._status_label = ctk.CTkLabel(
-            toolbar, text="Connecting…",
-            font=ctk.CTkFont(size=12), text_color=TEXT_DIM,
-        )
-        self._status_label.pack(side="right", padx=16)
-
-        # divider
-        ctk.CTkFrame(self.root, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x")
-
         # ── preview (expands to fill available space) ──
         self._preview_frame = tk.Frame(self.root, bg=BG)
         self._preview_frame.pack(fill="both", expand=True)
@@ -330,33 +268,96 @@ class ScannerApp:
         self._preview_canvas.pack(fill="both", expand=True)
         self._preview_canvas.bind("<Configure>", self._on_preview_resize)
         self._preview_canvas.bind("<Button-1>", lambda e: self._toggle_zoom())
-        self._preview_canvas.configure(cursor="hand2")
-        self._preview_canvas_img = None
         self._preview_w = 0
         self._preview_h = 0
 
-        # ── shutter area ──
-        shutter_area = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0, height=100)
-        shutter_area.pack(fill="x")
-        shutter_area.pack_propagate(False)
+        # ── divider ──
+        ctk.CTkFrame(self.root, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x")
 
-        # photo count (left)
-        self._count_label = ctk.CTkLabel(
-            shutter_area, text="",
-            font=ctk.CTkFont(size=14), text_color=TEXT_DIM,
+        # ── control bar (buttons + shutter + status) ──
+        controls = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=80)
+        controls.pack(fill="x")
+        controls.pack_propagate(False)
+
+        # left side: flash, focus, zoom buttons
+        left = ctk.CTkFrame(controls, fg_color="transparent")
+        left.pack(side="left", padx=(12, 0))
+
+        self._flash_img = ctk.CTkImage(flash_icon(False), size=(32, 32))
+        self._flash_btn = ctk.CTkButton(
+            left, image=self._flash_img, text="Flash",
+            font=ctk.CTkFont(size=9), text_color=TEXT_DIM,
+            fg_color="transparent", hover_color=SURFACE2,
+            width=50, height=64, compound="top",
+            command=self._toggle_flash,
         )
-        self._count_label.place(relx=0.12, rely=0.5, anchor="center")
+        self._flash_btn.pack(side="left", padx=2, pady=4)
 
-        # shutter button (center)
-        self._shutter_img = ImageTk.PhotoImage(shutter_ring(80))
+        self._af_img = ctk.CTkImage(af_icon(False), size=(32, 32))
+        self._af_btn = ctk.CTkButton(
+            left, image=self._af_img, text="Focus",
+            font=ctk.CTkFont(size=9), text_color=TEXT_DIM,
+            fg_color="transparent", hover_color=SURFACE2,
+            width=50, height=64, compound="top",
+            command=self._do_af,
+        )
+        self._af_btn.pack(side="left", padx=2, pady=4)
+
+        self._zoom_img = ctk.CTkImage(zoom_icon(False), size=(32, 32))
+        self._zoom_btn = ctk.CTkButton(
+            left, image=self._zoom_img, text="Zoom",
+            font=ctk.CTkFont(size=9), text_color=TEXT_DIM,
+            fg_color="transparent", hover_color=SURFACE2,
+            width=50, height=64, compound="top",
+            command=self._toggle_zoom,
+        )
+        self._zoom_btn.pack(side="left", padx=2, pady=4)
+
+        # center: shutter button
+        self._shutter_img = ImageTk.PhotoImage(shutter_ring(64))
         self._ui_refs["shutter"] = self._shutter_img
-        self._shutter_cv = tk.Canvas(shutter_area, width=80, height=80, bg=BG,
-                                     highlightthickness=0, cursor="hand2")
-        self._shutter_cv.create_image(40, 40, image=self._shutter_img)
+        self._shutter_cv = tk.Canvas(controls, width=64, height=64,
+                                     bg=SURFACE, highlightthickness=0)
+        self._shutter_cv.create_image(32, 32, image=self._shutter_img)
         self._shutter_cv.place(relx=0.5, rely=0.5, anchor="center")
         self._shutter_cv.bind("<Button-1>", lambda e: self._do_capture())
 
-        # divider
+        # right side: prefix field, count, status
+        right = ctk.CTkFrame(controls, fg_color="transparent")
+        right.pack(side="right", padx=(0, 14))
+
+        # status
+        self._status_label = ctk.CTkLabel(
+            right, text="",
+            font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
+        )
+        self._status_label.pack(side="bottom", pady=(0, 2))
+
+        # photo count
+        self._count_label = ctk.CTkLabel(
+            right, text="",
+            font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
+        )
+        self._count_label.pack(side="bottom", pady=0)
+
+        # filename prefix
+        prefix_row = ctk.CTkFrame(right, fg_color="transparent")
+        prefix_row.pack(side="bottom", pady=(0, 2))
+
+        ctk.CTkLabel(
+            prefix_row, text="Prefix:",
+            font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
+        ).pack(side="left", padx=(0, 4))
+
+        self._prefix_var = tk.StringVar(value="scan")
+        self._prefix_entry = ctk.CTkEntry(
+            prefix_row, textvariable=self._prefix_var,
+            width=100, height=24, font=ctk.CTkFont(size=11),
+            fg_color=SURFACE2, border_color=DIVIDER, text_color=TEXT_BRIGHT,
+        )
+        self._prefix_entry.pack(side="left")
+
+        # ── divider ──
         ctk.CTkFrame(self.root, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x")
 
         # ── photo roll ──
@@ -379,29 +380,16 @@ class ScannerApp:
             self._render_frame(self._raw_frame)
 
     def _render_frame(self, img):
-        """Scale frame to fit preview area or show 1:1, then display."""
+        """Scale frame to fit preview area, maintaining aspect ratio."""
         pw, ph = self._preview_w, self._preview_h
         if pw < 10 or ph < 10:
             return
 
-        if self.zoom_1to1:
-            # 1:1 — native pixels, centered in the preview area
-            display = img.copy()
-            iw, ih = display.size
-            # crop to preview area if larger
-            if iw > pw or ih > ph:
-                left = max(0, (iw - pw) // 2)
-                top  = max(0, (ih - ph) // 2)
-                right = min(iw, left + pw)
-                bottom = min(ih, top + ph)
-                display = display.crop((left, top, right, bottom))
-        else:
-            # fit — scale to fill preview while maintaining aspect ratio
-            iw, ih = img.size
-            scale = min(pw / iw, ph / ih)
-            nw = int(iw * scale)
-            nh = int(ih * scale)
-            display = img.resize((nw, nh), Image.LANCZOS)
+        iw, ih = img.size
+        scale = min(pw / iw, ph / ih)
+        nw = int(iw * scale)
+        nh = int(ih * scale)
+        display = img.resize((nw, nh), Image.LANCZOS)
 
         photo = ImageTk.PhotoImage(display)
         self._ui_refs["preview"] = photo
@@ -430,20 +418,38 @@ class ScannerApp:
         self.root.after(0, self._status_label.configure, {"text": msg})
 
     def _on_disconnect(self):
-        self._set_status("Camera disconnected — replug and restart")
+        self._set_status("Disconnected — replug USB")
 
-    # ── zoom toggle ──────────────────────────────────────────────────────────
+    # ── zoom toggle (5x sensor zoom via eoszoom) ───────────────────────────
 
     def _toggle_zoom(self):
-        self.zoom_1to1 = not self.zoom_1to1
-        self._zoom_img = ctk.CTkImage(zoom_icon(self.zoom_1to1), size=(36, 36))
+        self.zoomed = not self.zoomed
+        self._zoom_img = ctk.CTkImage(zoom_icon(self.zoomed), size=(36, 36))
         self._zoom_btn.configure(
             image=self._zoom_img,
-            text="1:1" if self.zoom_1to1 else "Fit",
-            text_color=GREEN if self.zoom_1to1 else TEXT_DIM,
+            text="5x" if self.zoomed else "Zoom",
+            text_color=GREEN if self.zoomed else TEXT_DIM,
         )
-        if self._raw_frame is not None:
-            self._render_frame(self._raw_frame)
+        self._set_status("Zooming in…" if self.zoomed else "Zooming out…")
+
+        want_zoom = self.zoomed
+
+        def zoom_job(cam):
+            cfg = cam.get_config()
+            ez = cfg.get_child_by_name("eoszoom")
+            ez.set_value("5" if want_zoom else "1")
+            cam.set_single_config("eoszoom", ez)
+            time.sleep(0.3)
+
+        def after():
+            self._set_status("5x zoom" if want_zoom else "Ready")
+
+        def run():
+            done = self._cam.run(zoom_job)
+            done.wait()
+            self.root.after(0, after)
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ── flash ─────────────────────────────────────────────────────────────────
 
@@ -530,7 +536,8 @@ class ScannerApp:
                     cf = cam.file_get(ed.folder, ed.name, gp.GP_FILE_TYPE_NORMAL)
                     ts = time.strftime("%Y-%m-%d_%H-%M-%S")
                     ext = Path(ed.name).suffix
-                    dest = SAVE_DIR / f"scan_{ts}{ext}"
+                    pfx = self._get_prefix()
+                    dest = SAVE_DIR / f"{pfx}_{ts}{ext}"
                     cf.save(str(dest))
                     self._on_file(dest)
 
@@ -551,17 +558,17 @@ class ScannerApp:
         threading.Thread(target=run, daemon=True).start()
 
     def _animate_shutter(self):
-        p = ImageTk.PhotoImage(shutter_ring(80, pressed=True))
+        p = ImageTk.PhotoImage(shutter_ring(64, pressed=True))
         self._ui_refs["sp"] = p
         self._shutter_cv.delete("all")
-        self._shutter_cv.create_image(40, 40, image=p)
+        self._shutter_cv.create_image(32, 32, image=p)
         self.root.after(120, self._reset_shutter)
 
     def _reset_shutter(self):
-        p = ImageTk.PhotoImage(shutter_ring(80))
+        p = ImageTk.PhotoImage(shutter_ring(64))
         self._ui_refs["shutter"] = p
         self._shutter_cv.delete("all")
-        self._shutter_cv.create_image(40, 40, image=p)
+        self._shutter_cv.create_image(32, 32, image=p)
 
     # ── photo roll ────────────────────────────────────────────────────────────
 

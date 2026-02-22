@@ -9,13 +9,16 @@ JPEGs (newest first). You can also drag more scans into the browser window.
 Crops are saved to  scan_folder/processed/  (or output/ if no folder given).
 """
 
-import sys, json, io, threading, webbrowser, email, email.policy, socket
+import sys, json, io, threading, webbrowser, email, email.policy, socket, tempfile, os
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 from PIL import Image, ImageOps
 import numpy as np
 import cv2
+import Vision
+import Quartz
+from Foundation import NSURL
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -26,138 +29,61 @@ RESULTS_FILE = OUTPUT_DIR / "results.json"  # derived in main()
 PORT         = 8765
 THUMB_SIZE   = (400, 400)
 
-WHITE_THRESHOLD = 230
-ROW_COL_ACTIVE  = 0.008
-MIN_SPAN_FRAC   = 0.05
-WORK_SCALE      = 6
-PADDING         = 25
+# ── Detection + perspective correction (Apple Vision) ─────────────────────────
 
-# ── Detection ──────────────────────────────────────────────────────────────────
+def find_and_extract_documents(pil_img):
+    """Use Apple's VNDetectDocumentSegmentationRequest to find and extract documents."""
+    # Write to temp file for Vision framework
+    tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+    try:
+        pil_img.save(tmp.name, 'JPEG', quality=95)
+        url = NSURL.fileURLWithPath_(tmp.name)
+        ci_image = Quartz.CIImage.imageWithContentsOfURL_(url)
+    finally:
+        os.unlink(tmp.name)
 
-def grayscale_array(img):
-    return np.array(img.convert("L"))
-
-def fill_small_gaps(active, min_gap):
-    filled = active.copy()
-    n, i = len(filled), 0
-    while i < n:
-        if not filled[i]:
-            j = i
-            while j < n and not filled[j]:
-                j += 1
-            if j - i < min_gap and i > 0 and j < n:
-                filled[i:j] = True
-            i = j
-        else:
-            i += 1
-    return filled
-
-def find_spans(active, min_gap, min_span):
-    filled = fill_small_gaps(active, min_gap)
-    spans, in_span, start = [], False, 0
-    for i, v in enumerate(filled):
-        if v and not in_span:
-            start, in_span = i, True
-        elif not v and in_span:
-            if i - start >= min_span:
-                spans.append((start, i - 1))
-            in_span = False
-    if in_span and len(filled) - start >= min_span:
-        spans.append((start, len(filled) - 1))
-    return spans
-
-def find_photo_regions(img):
-    w, h  = img.size
-    small = img.resize((max(1, w // WORK_SCALE), max(1, h // WORK_SCALE)), Image.LANCZOS)
-    gray  = grayscale_array(small)
-    sh, sw = gray.shape
-    mask        = gray < WHITE_THRESHOLD
-    row_content = np.mean(mask, axis=1)
-    col_content = np.mean(mask, axis=0)
-    if row_content.max() < ROW_COL_ACTIVE:
+    if ci_image is None:
         return []
-    min_span_r = max(3, int(sh * MIN_SPAN_FRAC))
-    min_span_c = max(3, int(sw * MIN_SPAN_FRAC))
-    huge = max(sh, sw)
-    overall_rows = find_spans(row_content > ROW_COL_ACTIVE, huge, min_span_r)
-    overall_cols = find_spans(col_content > ROW_COL_ACTIVE, huge, min_span_c)
-    if not overall_rows or not overall_cols:
+
+    handler = Vision.VNImageRequestHandler.alloc().initWithCIImage_options_(ci_image, None)
+    request = Vision.VNDetectDocumentSegmentationRequest.alloc().init()
+    success, error = handler.performRequests_error_([request], None)
+    if not success:
         return []
-    row_cov = sum(r1 - r0 for r0, r1 in overall_rows) / sh
-    col_cov = sum(c1 - c0 for c0, c1 in overall_cols) / sw
-    if row_cov > 0.70 and col_cov > 0.70:
-        min_gap_r = min_gap_c = 2
-    else:
-        min_gap_r = max(3, int(sh * 0.15))
-        min_gap_c = max(3, int(sw * 0.15))
-    row_spans = find_spans(row_content > ROW_COL_ACTIVE, min_gap_r, min_span_r)
-    col_spans = find_spans(col_content > ROW_COL_ACTIVE, min_gap_c, min_span_c)
-    boxes = []
-    for r0, r1 in row_spans:
-        for c0, c1 in col_spans:
-            boxes.append((
-                max(0,     c0 * WORK_SCALE - PADDING),
-                max(0,     r0 * WORK_SCALE - PADDING),
-                min(w - 1, c1 * WORK_SCALE + PADDING),
-                min(h - 1, r1 * WORK_SCALE + PADDING),
-            ))
-    return boxes
 
-# ── Perspective correction ─────────────────────────────────────────────────────
+    results = request.results()
+    if not results or len(results) == 0:
+        return []
 
-def correct_perspective(pil_img):
-    """Detect the photo quadrilateral and warp it straight. Returns original if no quad found."""
-    cv_img = np.array(pil_img)
-    gray = cv2.cvtColor(cv_img, cv2.COLOR_RGB2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, 50, 150)
+    obs = results[0]
+    if obs.confidence() < 0.5:
+        return []
 
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    # Get corners (normalized coords, origin bottom-left)
+    tl = obs.topLeft()
+    tr = obs.topRight()
+    br = obs.bottomRight()
+    bl = obs.bottomLeft()
 
-    h, w = gray.shape
-    img_area = h * w
-    quad = None
-
-    for cnt in contours[:10]:
-        peri = cv2.arcLength(cnt, True)
-        for eps_mult in (0.02, 0.03, 0.05, 0.08):
-            approx = cv2.approxPolyDP(cnt, eps_mult * peri, True)
-            if len(approx) == 4 and cv2.contourArea(approx) > 0.25 * img_area:
-                quad = approx
-                break
-        if quad is not None:
-            break
-
-    if quad is None:
-        return pil_img
-
-    pts = quad.reshape(4, 2).astype(np.float32)
-    s = pts.sum(axis=1)
-    d = np.diff(pts, axis=1).flatten()
-    ordered = np.array([
-        pts[np.argmin(s)],   # top-left
-        pts[np.argmin(d)],   # top-right
-        pts[np.argmax(s)],   # bottom-right
-        pts[np.argmax(d)],   # bottom-left
+    w, h = pil_img.size
+    corners = np.array([
+        [tl.x * w, (1 - tl.y) * h],
+        [tr.x * w, (1 - tr.y) * h],
+        [br.x * w, (1 - br.y) * h],
+        [bl.x * w, (1 - bl.y) * h],
     ], dtype=np.float32)
 
-    width = int(max(
-        np.linalg.norm(ordered[1] - ordered[0]),
-        np.linalg.norm(ordered[2] - ordered[3]),
-    ))
-    height = int(max(
-        np.linalg.norm(ordered[3] - ordered[0]),
-        np.linalg.norm(ordered[2] - ordered[1]),
-    ))
-
-    if width < 10 or height < 10:
-        return pil_img
+    # Perspective warp
+    cv_img = np.array(pil_img)
+    width = int(max(np.linalg.norm(corners[1] - corners[0]), np.linalg.norm(corners[2] - corners[3])))
+    height = int(max(np.linalg.norm(corners[3] - corners[0]), np.linalg.norm(corners[2] - corners[1])))
+    if width < 50 or height < 50:
+        return []
 
     dst = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
-    M = cv2.getPerspectiveTransform(ordered, dst)
+    M = cv2.getPerspectiveTransform(corners, dst)
     warped = cv2.warpPerspective(cv_img, M, (width, height))
-    return Image.fromarray(warped)
+    return [Image.fromarray(warped)]
 
 # ── State ──────────────────────────────────────────────────────────────────────
 
@@ -206,23 +132,21 @@ def _unique_path(directory, name):
     return out
 
 def process_upload(filename, file_bytes):
-    """Crop a single uploaded scan. Returns list of new result dicts."""
+    """Detect documents in image, perspective-correct, and save. Returns list of result dicts."""
     OUTPUT_DIR.mkdir(exist_ok=True)
     img = Image.open(io.BytesIO(file_bytes))
     img.load()
     img = ImageOps.exif_transpose(img)
-    regions = find_photo_regions(img)
-    if not regions:
+    documents = find_and_extract_documents(img)
+    if not documents:
         return []
     stem  = Path(filename).stem
-    multi = len(regions) > 1
+    multi = len(documents) > 1
     entries = []
-    for idx, (x1, y1, x2, y2) in enumerate(regions):
-        crop  = img.crop((x1, y1, x2, y2))
-        crop  = correct_perspective(crop)
+    for idx, doc in enumerate(documents):
         label = f"_crop{idx+1}" if multi else ""
         out   = _unique_path(OUTPUT_DIR, f"{stem}{label}.jpg")
-        crop.save(out, "JPEG", quality=95)
+        doc.save(out, "JPEG", quality=95)
         entries.append({
             "path":     str(out),
             "name":     out.name,

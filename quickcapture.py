@@ -6,9 +6,10 @@ Single camera thread with command queue (darktable-style architecture)
 
 import customtkinter as ctk
 import tkinter as tk
-import subprocess, threading, time, io, queue
+import subprocess, threading, time, io, queue, sys
 from pathlib import Path
 from PIL import Image, ImageTk, ImageDraw
+from PIL.Image import Exif
 
 import gphoto2 as gp
 
@@ -24,6 +25,7 @@ ICON_BG    = "#3a3a3c"
 YELLOW     = "#ffd60a"
 BLUE       = "#0a84ff"
 RED        = "#ff453a"
+GREEN      = "#30d158"
 
 TEXT_DIM   = "#8e8e93"
 TEXT_BRIGHT= "#ffffff"
@@ -140,12 +142,14 @@ class CameraThread:
         return done
 
     def _save_rotated(self, src_path, dest_path):
-        """Apply current rotation to a saved image."""
+        """Apply current rotation to a saved image and set EXIF orientation."""
         rot = self._get_rotation()
+        img = Image.open(dest_path)
         if rot:
-            img = Image.open(dest_path)
             img = img.rotate(rot, expand=True)
-            img.save(dest_path, quality=95)
+        exif = Exif()
+        exif[0x0112] = 1  # Orientation: pixels are correct, no viewer rotation
+        img.save(dest_path, quality=95, exif=exif.tobytes())
 
 
     def stop(self):
@@ -315,6 +319,13 @@ class QuickCaptureApp:
             self._cam.stop()
         self.root.destroy()
 
+    def _on_done(self):
+        script = Path(__file__).parent / "process_scans.py"
+        subprocess.Popen(
+            [sys.executable, str(script), str(SAVE_DIR)],
+            start_new_session=True,
+        )
+
     def _get_prefix(self):
         return self._prefix_var.get().strip() or "scan"
 
@@ -399,6 +410,15 @@ class QuickCaptureApp:
             corner_radius=10,
         )
         self._prefix_entry.pack(side="left")
+
+        self._done_btn = ctk.CTkButton(
+            right, text="Review Crops", width=110, height=36,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=GREEN, hover_color="#2ab84c",
+            text_color="#000000", corner_radius=10,
+            command=self._on_done,
+        )
+        self._done_btn.pack(side="left", padx=(12, 0))
 
         # ── thin separator ──
         ctk.CTkFrame(bottom, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x", padx=16, pady=(10, 0))
@@ -583,10 +603,12 @@ class QuickCaptureApp:
                     pfx = self._get_prefix()
                     dest = SAVE_DIR / f"{pfx}_{ts}{ext}"
                     cf.save(str(dest))
+                    img = Image.open(str(dest))
                     if rot:
-                        img = Image.open(str(dest))
                         img = img.rotate(rot, expand=True)
-                        img.save(str(dest), quality=95)
+                    exif = Exif()
+                    exif[0x0112] = 1  # Orientation: pixels are correct
+                    img.save(str(dest), quality=95, exif=exif.tobytes())
                     self._on_file(dest)
 
                     time.sleep(0.8)

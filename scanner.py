@@ -5,6 +5,7 @@ Single camera thread with command queue (darktable-style architecture)
 """
 
 import customtkinter as ctk
+import tkinter as tk
 import subprocess, threading, time, io, queue
 from pathlib import Path
 from PIL import Image, ImageTk, ImageDraw
@@ -12,8 +13,6 @@ from PIL import Image, ImageTk, ImageDraw
 import gphoto2 as gp
 
 SAVE_DIR  = Path.home() / "Desktop" / "Scans"
-PREVIEW_W = 800
-PREVIEW_H = 534
 THUMB_W   = 120
 THUMB_H   = 80
 
@@ -69,6 +68,38 @@ def af_icon(active, size=36):
         d.ellipse([cx-2*sc, cx-2*sc, cx+2*sc, cx+2*sc], fill=c)
     return _hq(size, draw)
 
+def zoom_icon(is_1to1, size=36):
+    def draw(d, s, sc):
+        d.ellipse([0, 0, s-1, s-1], fill=ICON_BG)
+        c = "#ffffff"
+        cx, cy = s // 2, s // 2
+        if is_1to1:
+            # "1:1" text approximation — two vertical bars with colon
+            bw, bh = 2*sc, 10*sc
+            d.rectangle([cx - 5*sc, cy - bh//2, cx - 5*sc + bw, cy + bh//2], fill=c)
+            d.rectangle([cx + 3*sc, cy - bh//2, cx + 3*sc + bw, cy + bh//2], fill=c)
+            dot = 1*sc
+            d.ellipse([cx - dot, cy - 3*sc - dot, cx + dot, cy - 3*sc + dot], fill=c)
+            d.ellipse([cx - dot, cy + 3*sc - dot, cx + dot, cy + 3*sc + dot], fill=c)
+        else:
+            # "fit" — four inward arrows
+            a = 5*sc
+            m = 8*sc
+            t = 2*sc
+            # top-left corner arrow
+            d.line([(m, m), (m + a, m)], fill=c, width=t)
+            d.line([(m, m), (m, m + a)], fill=c, width=t)
+            # top-right
+            d.line([(s-m, m), (s-m-a, m)], fill=c, width=t)
+            d.line([(s-m, m), (s-m, m+a)], fill=c, width=t)
+            # bottom-left
+            d.line([(m, s-m), (m+a, s-m)], fill=c, width=t)
+            d.line([(m, s-m), (m, s-m-a)], fill=c, width=t)
+            # bottom-right
+            d.line([(s-m, s-m), (s-m-a, s-m)], fill=c, width=t)
+            d.line([(s-m, s-m), (s-m, s-m-a)], fill=c, width=t)
+    return _hq(size, draw)
+
 def shutter_ring(size=80, pressed=False):
     def draw(d, s, sc):
         w, gap = 4*sc, 8*sc
@@ -98,8 +129,15 @@ class CameraThread:
     def stop(self):
         self._running = False
 
-    def _loop(self):
-        self._on_status("Freeing camera…")
+    def _drain_queue(self):
+        """Discard all pending jobs so UI threads don't block forever."""
+        while not self._q.empty():
+            _, done = self._q.get()
+            done.set()
+
+    def _connect(self):
+        """Try to connect to the camera. Returns camera object or None."""
+        self._on_status("Connecting…")
         subprocess.run(["killall","ptpcamerad","mscamerad","PTPCamera"],
                        capture_output=True)
         time.sleep(0.8)
@@ -115,48 +153,83 @@ class CameraThread:
             cfg = cam.get_config()
             cfg.get_child_by_name("viewfinder").set_value(1)
             cam.set_config(cfg)
-        except Exception as e:
-            self._on_status(f"⚠ {e}")
-            return
 
-        self._on_status("Ready")
+            self._on_status("Ready")
+            return cam
+        except Exception:
+            return None
 
+    def _loop(self):
         while self._running:
-            while not self._q.empty():
-                fn, done = self._q.get()
-                try:
-                    fn(cam)
-                except Exception as e:
-                    self._on_status(f"⚠ {e}")
-                finally:
-                    done.set()
+            # ── connect (retry until success) ──
+            cam = None
+            while self._running and cam is None:
+                cam = self._connect()
+                if cam is None:
+                    self._drain_queue()
+                    self._on_status("No camera — waiting…")
+                    time.sleep(2)
 
-            try:
-                cf   = cam.capture_preview()
-                data = cf.get_data_and_size()
-                img  = Image.open(io.BytesIO(data))
-                if img.width > PREVIEW_W or img.height > PREVIEW_H:
-                    img.thumbnail((PREVIEW_W, PREVIEW_H), Image.LANCZOS)
-                self._on_frame(img)
-            except gp.GPhoto2Error as e:
-                if e.code == gp.GP_ERROR_IO:
-                    self._on_disconnect()
-                    return
-                time.sleep(0.2)
-            except Exception:
-                time.sleep(0.1)
+            if not self._running:
+                return
 
+            # ── main loop ──
+            while self._running:
+                # drain queued jobs
+                while not self._q.empty():
+                    fn, done = self._q.get()
+                    try:
+                        fn(cam)
+                    except gp.GPhoto2Error as e:
+                        if e.code == gp.GP_ERROR_IO:
+                            done.set()
+                            break  # disconnect — will reconnect
+                        self._on_status(f"⚠ {e}")
+                    except Exception as e:
+                        self._on_status(f"⚠ {e}")
+                    finally:
+                        done.set()
+                else:
+                    # no disconnect during job processing — continue normally
+                    # grab a preview frame
+                    try:
+                        cf   = cam.capture_preview()
+                        data = cf.get_data_and_size()
+                        img  = Image.open(io.BytesIO(data))
+                        self._on_frame(img)
+                    except gp.GPhoto2Error as e:
+                        if e.code == gp.GP_ERROR_IO:
+                            break  # disconnect — will reconnect
+                        time.sleep(0.2)
+                    except Exception:
+                        time.sleep(0.1)
+
+                    # quick non-blocking event poll (manual shutter detection)
+                    try:
+                        et, ed = cam.wait_for_event(10)
+                        if et == gp.GP_EVENT_FILE_ADDED:
+                            cf   = cam.file_get(ed.folder, ed.name,
+                                                  gp.GP_FILE_TYPE_NORMAL)
+                            ts   = time.strftime("%Y-%m-%d_%H-%M-%S")
+                            ext  = Path(ed.name).suffix
+                            dest = SAVE_DIR / f"scan_{ts}{ext}"
+                            cf.save(str(dest))
+                            self._on_file(dest)
+                    except Exception:
+                        pass
+
+                    continue
+                # job loop broke (disconnect during job) — fall through to reconnect
+                break
+
+            # ── disconnected — clean up and retry ──
+            self._drain_queue()
+            self._on_disconnect()
             try:
-                et, ed = cam.wait_for_event(10)
-                if et == gp.GP_EVENT_FILE_ADDED:
-                    cf   = cam.file_get(ed.folder, ed.name, gp.GP_FILE_TYPE_NORMAL)
-                    ts   = time.strftime("%Y-%m-%d_%H-%M-%S")
-                    ext  = Path(ed.name).suffix
-                    dest = SAVE_DIR / f"scan_{ts}{ext}"
-                    cf.save(str(dest))
-                    self._on_file(dest)
+                cam.exit()
             except Exception:
                 pass
+            time.sleep(1)
 
 
 # ── app ───────────────────────────────────────────────────────────────────────
@@ -166,10 +239,14 @@ class ScannerApp:
         self.root = ctk.CTk()
         self.root.title("Scanner")
         self.root.configure(fg_color=BG)
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)
+        self.root.geometry("1024x768")
+        self.root.minsize(640, 480)
 
         self.capture_count = 0
         self.flash_on      = False
+        self.zoom_1to1     = False   # False = fit, True = 1:1
+        self._raw_frame    = None    # latest raw PIL frame from camera
         self._thumb_refs   = []
         self._ui_refs      = {}
         self._cam          = None
@@ -216,6 +293,17 @@ class ScannerApp:
         )
         self._af_btn.pack(side="left", padx=2, pady=4)
 
+        # zoom toggle button
+        self._zoom_img = ctk.CTkImage(zoom_icon(False), size=(36, 36))
+        self._zoom_btn = ctk.CTkButton(
+            toolbar, image=self._zoom_img, text="Fit",
+            font=ctk.CTkFont(size=10), text_color=TEXT_DIM,
+            fg_color="transparent", hover_color=SURFACE2,
+            width=56, height=52, compound="top",
+            command=self._toggle_zoom,
+        )
+        self._zoom_btn.pack(side="left", padx=2, pady=4)
+
         # title
         ctk.CTkLabel(
             toolbar, text="Scanner",
@@ -233,13 +321,22 @@ class ScannerApp:
         # divider
         ctk.CTkFrame(self.root, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x")
 
-        # ── preview ──
-        self._preview = ctk.CTkLabel(self.root, text="", fg_color=BG,
-                                     width=PREVIEW_W, height=PREVIEW_H)
-        self._preview.pack()
+        # ── preview (expands to fill available space) ──
+        self._preview_frame = tk.Frame(self.root, bg=BG)
+        self._preview_frame.pack(fill="both", expand=True)
+
+        self._preview_canvas = tk.Canvas(self._preview_frame, bg=BG,
+                                         highlightthickness=0)
+        self._preview_canvas.pack(fill="both", expand=True)
+        self._preview_canvas.bind("<Configure>", self._on_preview_resize)
+        self._preview_canvas.bind("<Button-1>", lambda e: self._toggle_zoom())
+        self._preview_canvas.configure(cursor="hand2")
+        self._preview_canvas_img = None
+        self._preview_w = 0
+        self._preview_h = 0
 
         # ── shutter area ──
-        shutter_area = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0, height=130)
+        shutter_area = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0, height=100)
         shutter_area.pack(fill="x")
         shutter_area.pack_propagate(False)
 
@@ -250,10 +347,9 @@ class ScannerApp:
         )
         self._count_label.place(relx=0.12, rely=0.5, anchor="center")
 
-        # shutter button (center) — use a canvas for the custom ring icon
+        # shutter button (center)
         self._shutter_img = ImageTk.PhotoImage(shutter_ring(80))
         self._ui_refs["shutter"] = self._shutter_img
-        import tkinter as tk
         self._shutter_cv = tk.Canvas(shutter_area, width=80, height=80, bg=BG,
                                      highlightthickness=0, cursor="hand2")
         self._shutter_cv.create_image(40, 40, image=self._shutter_img)
@@ -273,14 +369,53 @@ class ScannerApp:
         )
         self._roll_scroll.pack(fill="x", padx=0)
 
+    # ── preview scaling ──────────────────────────────────────────────────────
+
+    def _on_preview_resize(self, event):
+        self._preview_w = event.width
+        self._preview_h = event.height
+        # re-render current frame at new size
+        if self._raw_frame is not None:
+            self._render_frame(self._raw_frame)
+
+    def _render_frame(self, img):
+        """Scale frame to fit preview area or show 1:1, then display."""
+        pw, ph = self._preview_w, self._preview_h
+        if pw < 10 or ph < 10:
+            return
+
+        if self.zoom_1to1:
+            # 1:1 — native pixels, centered in the preview area
+            display = img.copy()
+            iw, ih = display.size
+            # crop to preview area if larger
+            if iw > pw or ih > ph:
+                left = max(0, (iw - pw) // 2)
+                top  = max(0, (ih - ph) // 2)
+                right = min(iw, left + pw)
+                bottom = min(ih, top + ph)
+                display = display.crop((left, top, right, bottom))
+        else:
+            # fit — scale to fill preview while maintaining aspect ratio
+            iw, ih = img.size
+            scale = min(pw / iw, ph / ih)
+            nw = int(iw * scale)
+            nh = int(ih * scale)
+            display = img.resize((nw, nh), Image.LANCZOS)
+
+        photo = ImageTk.PhotoImage(display)
+        self._ui_refs["preview"] = photo
+        self._preview_canvas.delete("all")
+        self._preview_canvas.create_image(pw // 2, ph // 2, image=photo, anchor="center")
+
     # ── camera callbacks ──────────────────────────────────────────────────────
 
     def _on_frame(self, img):
-        photo = ctk.CTkImage(img, size=(img.width, img.height))
-        self.root.after(0, self._show_frame, photo)
+        self.root.after(0, self._show_frame, img)
 
-    def _show_frame(self, photo):
-        self._preview.configure(image=photo)
+    def _show_frame(self, img):
+        self._raw_frame = img
+        self._render_frame(img)
 
     def _on_file(self, path):
         self.root.after(0, self._file_received, path)
@@ -297,6 +432,19 @@ class ScannerApp:
     def _on_disconnect(self):
         self._set_status("Camera disconnected — replug and restart")
 
+    # ── zoom toggle ──────────────────────────────────────────────────────────
+
+    def _toggle_zoom(self):
+        self.zoom_1to1 = not self.zoom_1to1
+        self._zoom_img = ctk.CTkImage(zoom_icon(self.zoom_1to1), size=(36, 36))
+        self._zoom_btn.configure(
+            image=self._zoom_img,
+            text="1:1" if self.zoom_1to1 else "Fit",
+            text_color=GREEN if self.zoom_1to1 else TEXT_DIM,
+        )
+        if self._raw_frame is not None:
+            self._render_frame(self._raw_frame)
+
     # ── flash ─────────────────────────────────────────────────────────────────
 
     def _toggle_flash(self):
@@ -306,23 +454,17 @@ class ScannerApp:
             image=self._flash_img,
             text_color=YELLOW if self.flash_on else TEXT_DIM,
         )
-        self._set_status("Flash: raising…" if self.flash_on else "Flash: lowering…")
+        self._set_status("Flash on…" if self.flash_on else "Flash off…")
 
         want_on = self.flash_on
 
         def flash_job(cam):
-            # popupflash is a TOGGLE — must reset to 0 then set to 1 each time
-            # otherwise gphoto2 caches the value and the second press is a no-op
+            # switch between Green (auto flash) and Flash Off exposure mode
             cfg = cam.get_config()
-            pf = cfg.get_child_by_name("popupflash")
-            pf.set_value(0)
-            cam.set_single_config("popupflash", pf)
-            time.sleep(0.1)
-            cfg = cam.get_config()
-            pf = cfg.get_child_by_name("popupflash")
-            pf.set_value(1)
-            cam.set_single_config("popupflash", pf)
-            time.sleep(0.5)
+            mode = cfg.get_child_by_name("autoexposuremode")
+            mode.set_value("Green" if want_on else "Flash Off")
+            cam.set_single_config("autoexposuremode", mode)
+            time.sleep(0.3)
 
         def after():
             self._set_status("Flash on" if want_on else "Flash off")
@@ -409,7 +551,6 @@ class ScannerApp:
         threading.Thread(target=run, daemon=True).start()
 
     def _animate_shutter(self):
-        import tkinter as tk
         p = ImageTk.PhotoImage(shutter_ring(80, pressed=True))
         self._ui_refs["sp"] = p
         self._shutter_cv.delete("all")
@@ -444,8 +585,9 @@ class ScannerApp:
             self._thumb_refs.append(photo)
 
             lbl = ctk.CTkLabel(self._roll_scroll, image=photo, text="",
-                               fg_color="transparent")
+                               fg_color="transparent", cursor="hand2")
             lbl.pack(side="left", padx=6, pady=6)
+            lbl.bind("<Button-1>", lambda e, p=str(path): subprocess.Popen(["open", p]))
         except Exception as e:
             print(f"Thumb: {e}")
 

@@ -13,18 +13,19 @@ from PIL import Image, ImageTk, ImageDraw
 import gphoto2 as gp
 
 SAVE_DIR  = Path.home() / "Desktop" / "Scans"
-THUMB_W   = 120
-THUMB_H   = 80
+THUMB_W   = 100
+THUMB_H   = 74
 
 # ── palette ───────────────────────────────────────────────────────────────────
 BG         = "#000000"
 SURFACE    = "#1c1c1e"
 SURFACE2   = "#2c2c2e"
-ICON_BG    = "#48484a"
+ICON_BG    = "#3a3a3c"
 YELLOW     = "#ffd60a"
 BLUE       = "#0a84ff"
+RED        = "#ff453a"
 
-TEXT_DIM   = "#98989d"
+TEXT_DIM   = "#8e8e93"
 TEXT_BRIGHT= "#ffffff"
 DIVIDER    = "#38383a"
 
@@ -32,63 +33,104 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 
-# ── high-quality icons (3x supersampled) ──────────────────────────────────────
+# ── high-quality icons (4x supersampled) ──────────────────────────────────────
 
 def _hq(size, fn):
-    sc = 3
+    sc = 4
     big = size * sc
     img = Image.new("RGBA", (big, big), (0,0,0,0))
     d = ImageDraw.Draw(img)
     fn(d, big, sc)
     return img.resize((size, size), Image.LANCZOS)
 
-def flash_icon(on, size=36):
+def flash_icon(on, size=28):
     def draw(d, s, sc):
-        d.ellipse([0, 0, s-1, s-1], fill=YELLOW if on else ICON_BG)
+        # no background — _make_round_btn provides the circle
         cx, color = s/2, "#000000" if on else "#ffffff"
         d.polygon([
-            (cx + 1*sc, 3*sc), (cx - 4*sc, s//2 + 1*sc),
-            (cx + 0*sc, s//2 + 1*sc), (cx - 1*sc, s - 3*sc),
+            (cx + 1*sc, 4*sc), (cx - 4*sc, s//2 + 1*sc),
+            (cx + 0*sc, s//2 + 1*sc), (cx - 1*sc, s - 4*sc),
             (cx + 4*sc, s//2 - 1*sc), (cx + 0*sc, s//2 - 1*sc),
         ], fill=color)
     return _hq(size, draw)
 
-def af_icon(active, size=36):
+def af_icon(active, size=32):
     def draw(d, s, sc):
-        d.ellipse([0, 0, s-1, s-1], fill=BLUE if active else ICON_BG)
-        m, r, t, c = 10*sc, 7*sc, 3*sc, "#ffffff"
-        for rect in [
-            [m, m, m+r, m+t], [m, m, m+t, m+r],
-            [s-m-r, m, s-m, m+t], [s-m-t, m, s-m, m+r],
-            [m, s-m-t, m+r, s-m], [m, s-m-r, m+t, s-m],
-            [s-m-r, s-m-t, s-m, s-m], [s-m-t, s-m-r, s-m, s-m],
-        ]:
-            d.rounded_rectangle(rect, radius=sc, fill=c)
-        cx = s // 2
-        d.ellipse([cx-2*sc, cx-2*sc, cx+2*sc, cx+2*sc], fill=c)
+        # no background — _make_round_btn provides the circle
+        c = "#ffffff"
+        cx, cy = s // 2, s // 2
+        # letter A
+        ax = cx - 6*sc
+        d.line([(ax, cy+5*sc), (ax+4*sc, cy-5*sc)], fill=c, width=2*sc)
+        d.line([(ax+4*sc, cy-5*sc), (ax+8*sc, cy+5*sc)], fill=c, width=2*sc)
+        d.line([(ax+2*sc, cy+1*sc), (ax+6*sc, cy+1*sc)], fill=c, width=2*sc)
+        # letter F
+        fx = cx + 2*sc
+        d.line([(fx, cy+5*sc), (fx, cy-5*sc)], fill=c, width=2*sc)
+        d.line([(fx, cy-5*sc), (fx+6*sc, cy-5*sc)], fill=c, width=2*sc)
+        d.line([(fx, cy), (fx+5*sc, cy)], fill=c, width=2*sc)
     return _hq(size, draw)
 
 
-def shutter_ring(size=80, pressed=False):
+def rotate_icon(size=28):
     def draw(d, s, sc):
-        w, gap = 4*sc, 8*sc
-        c = "#999999" if pressed else "#ffffff"
-        d.ellipse([0, 0, s-1, s-1], outline=c, width=w)
-        d.ellipse([gap, gap, s-gap, s-gap], fill=c)
+        # no background — _make_round_btn provides the circle
+        c = "#ffffff"
+        cx, cy = s//2, s//2
+        # circular arrow (arc + arrowhead)
+        r = 5*sc
+        d.arc([cx-r, cy-r, cx+r, cy+r], start=220, end=80, fill=c, width=2*sc)
+        # arrowhead at ~80 degrees (top-right)
+        import math
+        angle = math.radians(80)
+        ax = cx + r * math.cos(angle)
+        ay = cy - r * math.sin(angle)
+        d.polygon([
+            (ax, ay),
+            (ax - 3*sc, ay - 1*sc),
+            (ax - 1*sc, ay + 3*sc),
+        ], fill=c)
+    return _hq(size, draw)
+
+def _make_round_btn(icon_img, size, bg=None):
+    """Composite an icon image centered on a filled circle."""
+    sc = 3
+    big = size * sc
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse([0, 0, big-1, big-1], fill=bg or ICON_BG)
+    # paste icon centered
+    iw, ih = icon_img.size
+    # scale icon up to match
+    icon_big = icon_img.resize((iw * sc, ih * sc), Image.LANCZOS)
+    ix = (big - icon_big.width) // 2
+    iy = (big - icon_big.height) // 2
+    img.paste(icon_big, (ix, iy), icon_big)
+    return img.resize((size, size), Image.LANCZOS)
+
+def shutter_ring(size=72, pressed=False):
+    def draw(d, s, sc):
+        w, gap = 3*sc, 6*sc
+        outer = "#999999" if pressed else "#ffffff"
+        inner = "#b0b0b0" if pressed else "#ffffff"
+        d.ellipse([0, 0, s-1, s-1], outline=outer, width=w)
+        d.ellipse([gap, gap, s-gap, s-gap], fill=inner)
     return _hq(size, draw)
 
 
 # ── camera thread ─────────────────────────────────────────────────────────────
 
 class CameraThread:
-    def __init__(self, on_frame, on_file, on_status, on_disconnect, get_prefix):
+    def __init__(self, on_frame, on_file, on_status, on_disconnect, get_prefix, get_rotation):
         self._on_frame      = on_frame
         self._on_file       = on_file
         self._on_status     = on_status
         self._on_disconnect = on_disconnect
         self._get_prefix    = get_prefix
+        self._get_rotation  = get_rotation
         self._q             = queue.Queue()
         self._running       = True
+        self._cam_ref       = None  # live camera reference for shutdown
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -97,9 +139,26 @@ class CameraThread:
         self._q.put((fn, done))
         return done
 
+    def _save_rotated(self, src_path, dest_path):
+        """Apply current rotation to a saved image."""
+        rot = self._get_rotation()
+        if rot:
+            img = Image.open(dest_path)
+            img = img.rotate(rot, expand=True)
+            img.save(dest_path, quality=95)
+
+
     def stop(self):
         self._running = False
-        self._thread.join(timeout=3)
+        # release camera immediately from main thread if thread is stuck
+        cam = self._cam_ref
+        if cam is not None:
+            try:
+                cam.exit()
+            except Exception:
+                pass
+            self._cam_ref = None
+        self._thread.join(timeout=2)
 
     def _drain_queue(self):
         """Discard all pending jobs so UI threads don't block forever."""
@@ -109,8 +168,7 @@ class CameraThread:
 
     def _connect(self):
         """Try to connect to the camera. Returns camera object or None."""
-        self._on_status("Connecting…")
-        # SIGKILL — macOS PTP daemons survive regular SIGTERM
+        self._on_status("Connecting...", True)
         subprocess.run(["killall", "-9", "ptpcamerad", "mscamerad", "PTPCamera"],
                        capture_output=True)
         time.sleep(1.5)
@@ -127,6 +185,7 @@ class CameraThread:
             cfg.get_child_by_name("viewfinder").set_value(1)
             cam.set_config(cfg)
 
+            self._cam_ref = cam
             self._on_status("Ready")
             return cam
         except Exception:
@@ -134,13 +193,12 @@ class CameraThread:
 
     def _loop(self):
         while self._running:
-            # ── connect (retry until success) ──
             cam = None
             while self._running and cam is None:
                 cam = self._connect()
                 if cam is None:
                     self._drain_queue()
-                    self._on_status("No camera — waiting…")
+                    self._on_status("No camera -- waiting...", True)
                     time.sleep(2)
 
             if not self._running:
@@ -188,6 +246,7 @@ class CameraThread:
                             pfx  = self._get_prefix()
                             dest = SAVE_DIR / f"{pfx}_{ts}{ext}"
                             cf.save(str(dest))
+                            self._save_rotated(str(dest), str(dest))
                             self._on_file(dest)
                     except Exception:
                         pass
@@ -205,6 +264,7 @@ class CameraThread:
                 except Exception:
                     pass
                 return
+            self._cam_ref = None
             self._on_disconnect()
             try:
                 cam.exit()
@@ -221,17 +281,20 @@ class ScannerApp:
         self.root.title("Scanner")
         self.root.configure(fg_color=BG)
         self.root.resizable(True, True)
-        self.root.geometry("1024x768")
-        self.root.minsize(640, 480)
+        self.root.geometry("1100x820")
+        self.root.minsize(700, 520)
 
         self.capture_count = 0
         self.flash_on      = False
-        self._raw_frame    = None    # latest raw PIL frame from camera
+        self._rotation     = 0  # 0, 90, 180, 270
+        self._raw_frame    = None
         self._thumb_refs   = []
         self._ui_refs      = {}
         self._cam          = None
 
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
+        self.root.createcommand("::tk::mac::Quit", self._on_quit)
         self.root.bind("<space>", lambda e: self._do_capture()
                        if not isinstance(e.widget, ctk.CTkEntry) else None)
         SAVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -241,13 +304,16 @@ class ScannerApp:
             on_status     = self._set_status,
             on_disconnect = self._on_disconnect,
             get_prefix    = self._get_prefix,
+            get_rotation  = lambda: self._rotation,
         )
 
     def run(self):
         self.root.mainloop()
-        # clean up camera on quit
+
+    def _on_quit(self):
         if self._cam:
             self._cam.stop()
+        self.root.destroy()
 
     def _get_prefix(self):
         return self._prefix_var.get().strip() or "scan"
@@ -255,7 +321,7 @@ class ScannerApp:
     # ── build UI ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ── preview (expands to fill available space) ──
+        # ── preview area (expands to fill) ──
         self._preview_frame = tk.Frame(self.root, bg=BG)
         self._preview_frame.pack(fill="both", expand=True)
 
@@ -264,96 +330,91 @@ class ScannerApp:
         self._preview_canvas.pack(fill="both", expand=True)
         self._preview_canvas.bind("<Configure>", self._on_preview_resize)
 
+        self._status_id = None  # canvas text item
+        self._status_clear_id = None  # pending after() id
 
         self._preview_w = 0
         self._preview_h = 0
 
-        # ── divider ──
-        ctk.CTkFrame(self.root, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x")
+        # ── bottom bar container ──
+        bottom = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0)
+        bottom.pack(fill="x")
 
-        # ── control bar ──
-        controls = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=80)
-        controls.pack(fill="x")
+        # ── control bar (fixed height) ──
+        controls = ctk.CTkFrame(bottom, fg_color="transparent", corner_radius=0, height=90)
+        controls.pack(fill="x", padx=20, pady=(12, 0))
         controls.pack_propagate(False)
 
-        # left: flash, focus, zoom — placed at left, vertically centered
+        # left side: flash + focus buttons
         left = ctk.CTkFrame(controls, fg_color="transparent")
-        left.place(relx=0.0, rely=0.5, anchor="w", x=12)
+        left.place(relx=0.0, rely=0.5, anchor="w")
 
-        self._flash_img = ctk.CTkImage(flash_icon(False), size=(32, 32))
-        self._flash_btn = ctk.CTkButton(
-            left, image=self._flash_img, text="Flash",
-            font=ctk.CTkFont(size=9), text_color=TEXT_DIM,
-            fg_color="transparent", hover_color=SURFACE2,
-            width=50, height=64, compound="top",
-            command=self._toggle_flash,
-        )
-        self._flash_btn.pack(side="left", padx=2)
+        self._flash_pil = _make_round_btn(flash_icon(False), 44)
+        self._flash_photo = ImageTk.PhotoImage(self._flash_pil)
+        self._flash_cv = tk.Canvas(left, width=44, height=44, bg=SURFACE,
+                                   highlightthickness=0)
+        self._flash_cv.create_image(22, 22, image=self._flash_photo)
+        self._flash_cv.pack(side="left", padx=(0, 10))
+        self._flash_cv.bind("<Button-1>", lambda e: self._toggle_flash())
 
-        self._af_img = ctk.CTkImage(af_icon(False), size=(32, 32))
-        self._af_btn = ctk.CTkButton(
-            left, image=self._af_img, text="Focus",
-            font=ctk.CTkFont(size=9), text_color=TEXT_DIM,
-            fg_color="transparent", hover_color=SURFACE2,
-            width=50, height=64, compound="top",
-            command=self._do_af,
-        )
-        self._af_btn.pack(side="left", padx=2)
+        self._af_pil = _make_round_btn(af_icon(False), 44)
+        self._af_photo = ImageTk.PhotoImage(self._af_pil)
+        self._af_cv = tk.Canvas(left, width=44, height=44, bg=SURFACE,
+                                highlightthickness=0)
+        self._af_cv.create_image(22, 22, image=self._af_photo)
+        self._af_cv.pack(side="left", padx=(0, 10))
+        self._af_cv.bind("<Button-1>", lambda e: self._do_af())
+
+        self._rot_pil = _make_round_btn(rotate_icon(), 44)
+        self._rot_photo = ImageTk.PhotoImage(self._rot_pil)
+        self._rot_cv = tk.Canvas(left, width=44, height=44, bg=SURFACE,
+                                 highlightthickness=0)
+        self._rot_cv.create_image(22, 22, image=self._rot_photo)
+        self._rot_cv.pack(side="left", padx=(0, 10))
+        self._rot_cv.bind("<Button-1>", lambda e: self._do_rotate())
 
         # center: shutter button
-        self._shutter_img = ImageTk.PhotoImage(shutter_ring(64))
+        self._shutter_img = ImageTk.PhotoImage(shutter_ring(72))
         self._ui_refs["shutter"] = self._shutter_img
-        self._shutter_cv = tk.Canvas(controls, width=64, height=64,
+        self._shutter_cv = tk.Canvas(controls, width=72, height=72,
                                      bg=SURFACE, highlightthickness=0)
-        self._shutter_cv.create_image(32, 32, image=self._shutter_img)
+        self._shutter_cv.create_image(36, 36, image=self._shutter_img)
         self._shutter_cv.place(relx=0.5, rely=0.5, anchor="center")
         self._shutter_cv.bind("<Button-1>", lambda e: self._do_capture())
 
-        # right: name field + status — placed at right, vertically centered
+        # right side: name field
         right = ctk.CTkFrame(controls, fg_color="transparent")
-        right.place(relx=1.0, rely=0.5, anchor="e", x=-16)
-
-        name_row = ctk.CTkFrame(right, fg_color="transparent")
-        name_row.pack()
+        right.place(relx=1.0, rely=0.5, anchor="e")
 
         ctk.CTkLabel(
-            name_row, text="Name:",
-            font=ctk.CTkFont(size=12), text_color=TEXT_DIM,
-        ).pack(side="left", padx=(0, 6))
+            right, text="Name",
+            font=ctk.CTkFont(size=11), text_color=TEXT_DIM,
+        ).pack(side="left", padx=(0, 8))
 
         self._prefix_var = tk.StringVar(value="scan")
         self._prefix_entry = ctk.CTkEntry(
-            name_row, textvariable=self._prefix_var,
-            width=160, height=28, font=ctk.CTkFont(size=12),
+            right, textvariable=self._prefix_var,
+            width=140, height=36, font=ctk.CTkFont(size=13),
             fg_color=SURFACE2, border_color=DIVIDER, text_color=TEXT_BRIGHT,
+            corner_radius=10,
         )
         self._prefix_entry.pack(side="left")
 
-        self._status_label = ctk.CTkLabel(
-            right, text="",
-            font=ctk.CTkFont(size=10), text_color=TEXT_DIM,
-        )
-        self._status_label.pack(pady=(2, 0))
-
-        # ── divider ──
-        ctk.CTkFrame(self.root, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x")
+        # ── thin separator ──
+        ctk.CTkFrame(bottom, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x", padx=16, pady=(10, 0))
 
         # ── photo roll ──
-        roll_frame = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0)
-        roll_frame.pack(fill="x")
-
         self._roll_scroll = ctk.CTkScrollableFrame(
-            roll_frame, fg_color=SURFACE, height=THUMB_H + 20,
+            bottom, fg_color=SURFACE, height=THUMB_H + 16,
             orientation="horizontal", corner_radius=0,
         )
-        self._roll_scroll.pack(fill="x", padx=0)
+        self._roll_scroll.pack(fill="x", padx=8, pady=(4, 8))
 
     # ── preview scaling ──────────────────────────────────────────────────────
 
     def _on_preview_resize(self, event):
         self._preview_w = event.width
         self._preview_h = event.height
-        # re-render current frame at new size
         if self._raw_frame is not None:
             self._render_frame(self._raw_frame)
 
@@ -362,6 +423,9 @@ class ScannerApp:
         pw, ph = self._preview_w, self._preview_h
         if pw < 10 or ph < 10:
             return
+
+        if self._rotation:
+            img = img.rotate(self._rotation, expand=True)
 
         iw, ih = img.size
         scale = min(pw / iw, ph / ih)
@@ -390,23 +454,51 @@ class ScannerApp:
         self.capture_count += 1
         self._add_thumb(path)
 
-    def _set_status(self, msg):
-        self.root.after(0, self._status_label.configure, {"text": msg})
+    def _set_status(self, msg, persist=False):
+        def _update():
+            # cancel pending clear
+            if self._status_clear_id is not None:
+                self.root.after_cancel(self._status_clear_id)
+                self._status_clear_id = None
+            # remove old text
+            if self._status_id is not None:
+                self._preview_canvas.delete(self._status_id)
+                self._status_id = None
+            if msg:
+                pw = self._preview_w or 400
+                self._status_id = self._preview_canvas.create_text(
+                    pw // 2, 24, text=msg, fill=TEXT_DIM,
+                    font=("Helvetica", 13))
+            if not persist and msg:
+                self._status_clear_id = self.root.after(
+                    2500, lambda: self._clear_status())
+        self.root.after(0, _update)
+
+    def _clear_status(self):
+        if self._status_id is not None:
+            self._preview_canvas.delete(self._status_id)
+            self._status_id = None
+        self._status_clear_id = None
 
     def _on_disconnect(self):
-        self._set_status("Disconnected — replug USB")
+        self._set_status("Disconnected -- replug USB", True)
+
+    def _do_rotate(self):
+        self._rotation = (self._rotation + 90) % 360
+        if self._raw_frame is not None:
+            self._render_frame(self._raw_frame)
 
 
     # ── flash ─────────────────────────────────────────────────────────────────
 
     def _toggle_flash(self):
         self.flash_on = not self.flash_on
-        self._flash_img = ctk.CTkImage(flash_icon(self.flash_on), size=(32, 32))
-        self._flash_btn.configure(
-            image=self._flash_img,
-            text_color=YELLOW if self.flash_on else TEXT_DIM,
-        )
-        self._set_status("Flash on…" if self.flash_on else "Flash off…")
+        self._flash_pil = _make_round_btn(flash_icon(self.flash_on), 44,
+                                          bg=YELLOW if self.flash_on else None)
+        self._flash_photo = ImageTk.PhotoImage(self._flash_pil)
+        self._flash_cv.delete("all")
+        self._flash_cv.create_image(22, 22, image=self._flash_photo)
+        self._set_status("Flash on" if self.flash_on else "Flash off")
 
         want_on = self.flash_on
 
@@ -430,10 +522,16 @@ class ScannerApp:
 
     # ── autofocus ─────────────────────────────────────────────────────────────
 
+    def _update_af_btn(self, active):
+        self._af_pil = _make_round_btn(af_icon(active), 44,
+                                       bg=BLUE if active else None)
+        self._af_photo = ImageTk.PhotoImage(self._af_pil)
+        self._af_cv.delete("all")
+        self._af_cv.create_image(22, 22, image=self._af_photo)
+
     def _do_af(self):
-        self._af_img = ctk.CTkImage(af_icon(True), size=(32, 32))
-        self._af_btn.configure(image=self._af_img, text_color=BLUE)
-        self._set_status("Focusing…")
+        self._update_af_btn(True)
+        self._set_status("Focusing...", True)
 
         def af_job(cam):
             # autofocusdrive is a TOGGLE — must reset to 0 then set to 1
@@ -450,8 +548,7 @@ class ScannerApp:
             time.sleep(2.0)  # give lens time to seek and lock
 
         def after():
-            self._af_img = ctk.CTkImage(af_icon(False), size=(32, 32))
-            self._af_btn.configure(image=self._af_img, text_color=TEXT_DIM)
+            self._update_af_btn(False)
             self._set_status("Ready")
 
         def run():
@@ -465,7 +562,8 @@ class ScannerApp:
 
     def _do_capture(self):
         self._animate_shutter()
-        self._set_status("Capturing…")
+        self._set_status("Capturing...", True)
+        rot = self._rotation  # capture current rotation at time of click
 
         def capture_job(cam):
             for val in ("Press Half","Press Full","Release Full","Release Half"):
@@ -485,6 +583,10 @@ class ScannerApp:
                     pfx = self._get_prefix()
                     dest = SAVE_DIR / f"{pfx}_{ts}{ext}"
                     cf.save(str(dest))
+                    if rot:
+                        img = Image.open(str(dest))
+                        img = img.rotate(rot, expand=True)
+                        img.save(str(dest), quality=95)
                     self._on_file(dest)
 
                     time.sleep(0.8)
@@ -499,22 +601,22 @@ class ScannerApp:
         def run():
             done = self._cam.run(capture_job)
             done.wait()
-            self.root.after(0, self._set_status, "Ready")
+            self.root.after(0, lambda: self._set_status("Ready"))
 
         threading.Thread(target=run, daemon=True).start()
 
     def _animate_shutter(self):
-        p = ImageTk.PhotoImage(shutter_ring(64, pressed=True))
+        p = ImageTk.PhotoImage(shutter_ring(72, pressed=True))
         self._ui_refs["sp"] = p
         self._shutter_cv.delete("all")
-        self._shutter_cv.create_image(32, 32, image=p)
+        self._shutter_cv.create_image(36, 36, image=p)
         self.root.after(120, self._reset_shutter)
 
     def _reset_shutter(self):
-        p = ImageTk.PhotoImage(shutter_ring(64))
+        p = ImageTk.PhotoImage(shutter_ring(72))
         self._ui_refs["shutter"] = p
         self._shutter_cv.delete("all")
-        self._shutter_cv.create_image(32, 32, image=p)
+        self._shutter_cv.create_image(36, 36, image=p)
 
     # ── photo roll ────────────────────────────────────────────────────────────
 
@@ -538,15 +640,15 @@ class ScannerApp:
             self._thumb_refs.append(photo)
 
             lbl = ctk.CTkLabel(self._roll_scroll, image=photo, text="",
-                               fg_color="transparent", cursor="hand2")
-            lbl.pack(side="left", padx=6, pady=6)
+                               fg_color="transparent")
+            lbl.pack(side="left", padx=4, pady=4)
             lbl.bind("<Button-1>", lambda e, p=str(path): subprocess.Popen(["open", p]))
         except Exception as e:
             print(f"Thumb: {e}")
 
 
 if __name__ == "__main__":
-    import fcntl, sys
+    import fcntl, sys, atexit, signal
     lockfile = open("/tmp/scanner_app.lock", "w")
     try:
         fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -554,4 +656,11 @@ if __name__ == "__main__":
         print("Scanner is already running.")
         sys.exit(0)
     app = ScannerApp()
+
+    def _cleanup(*_):
+        if app._cam:
+            app._cam.stop()
+    atexit.register(_cleanup)
+    signal.signal(signal.SIGTERM, lambda *_: (_cleanup(), sys.exit(0)))
+
     app.run()

@@ -23,7 +23,7 @@ SURFACE2   = "#2c2c2e"
 ICON_BG    = "#48484a"
 YELLOW     = "#ffd60a"
 BLUE       = "#0a84ff"
-GREEN      = "#30d158"
+
 TEXT_DIM   = "#98989d"
 TEXT_BRIGHT= "#ffffff"
 DIVIDER    = "#38383a"
@@ -68,22 +68,6 @@ def af_icon(active, size=36):
         d.ellipse([cx-2*sc, cx-2*sc, cx+2*sc, cx+2*sc], fill=c)
     return _hq(size, draw)
 
-def zoom_icon(zoomed, size=36):
-    def draw(d, s, sc):
-        d.ellipse([0, 0, s-1, s-1], fill=GREEN if zoomed else ICON_BG)
-        c = "#ffffff"
-        cx, cy = s // 2, s // 2
-        # magnifying glass
-        r = 6 * sc
-        d.ellipse([cx - r, cy - r - 2*sc, cx + r, cy + r - 2*sc], outline=c, width=2*sc)
-        # handle
-        d.line([(cx + 4*sc, cy + 4*sc - 2*sc), (cx + 8*sc, cy + 8*sc - 2*sc)],
-               fill=c, width=3*sc)
-        if zoomed:
-            # "+" inside lens
-            d.line([(cx - 3*sc, cy - 2*sc), (cx + 3*sc, cy - 2*sc)], fill=c, width=2*sc)
-            d.line([(cx, cy - 5*sc), (cx, cy + 1*sc)], fill=c, width=2*sc)
-    return _hq(size, draw)
 
 def shutter_ring(size=80, pressed=False):
     def draw(d, s, sc):
@@ -105,7 +89,8 @@ class CameraThread:
         self._get_prefix    = get_prefix
         self._q             = queue.Queue()
         self._running       = True
-        threading.Thread(target=self._loop, daemon=True).start()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
     def run(self, fn):
         done = threading.Event()
@@ -114,6 +99,7 @@ class CameraThread:
 
     def stop(self):
         self._running = False
+        self._thread.join(timeout=3)
 
     def _drain_queue(self):
         """Discard all pending jobs so UI threads don't block forever."""
@@ -210,8 +196,15 @@ class CameraThread:
                 # job loop broke (disconnect during job) — fall through to reconnect
                 break
 
-            # ── disconnected — clean up and retry ──
+            # ── disconnected or shutting down — clean up ──
             self._drain_queue()
+            if not self._running:
+                # quitting — release camera cleanly
+                try:
+                    cam.exit()
+                except Exception:
+                    pass
+                return
             self._on_disconnect()
             try:
                 cam.exit()
@@ -233,7 +226,6 @@ class ScannerApp:
 
         self.capture_count = 0
         self.flash_on      = False
-        self.zoomed        = False   # False = normal, True = 5x sensor zoom
         self._raw_frame    = None    # latest raw PIL frame from camera
         self._thumb_refs   = []
         self._ui_refs      = {}
@@ -253,6 +245,9 @@ class ScannerApp:
 
     def run(self):
         self.root.mainloop()
+        # clean up camera on quit
+        if self._cam:
+            self._cam.stop()
 
     def _get_prefix(self):
         return self._prefix_var.get().strip() or "scan"
@@ -268,21 +263,22 @@ class ScannerApp:
                                          highlightthickness=0)
         self._preview_canvas.pack(fill="both", expand=True)
         self._preview_canvas.bind("<Configure>", self._on_preview_resize)
-        self._preview_canvas.bind("<Button-1>", lambda e: self._toggle_zoom())
+
+
         self._preview_w = 0
         self._preview_h = 0
 
         # ── divider ──
         ctk.CTkFrame(self.root, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x")
 
-        # ── control bar (buttons + shutter + status) ──
+        # ── control bar ──
         controls = ctk.CTkFrame(self.root, fg_color=SURFACE, corner_radius=0, height=80)
         controls.pack(fill="x")
         controls.pack_propagate(False)
 
-        # left side: flash, focus, zoom buttons
+        # left: flash, focus, zoom — placed at left, vertically centered
         left = ctk.CTkFrame(controls, fg_color="transparent")
-        left.pack(side="left", padx=(12, 0))
+        left.place(relx=0.0, rely=0.5, anchor="w", x=12)
 
         self._flash_img = ctk.CTkImage(flash_icon(False), size=(32, 32))
         self._flash_btn = ctk.CTkButton(
@@ -292,7 +288,7 @@ class ScannerApp:
             width=50, height=64, compound="top",
             command=self._toggle_flash,
         )
-        self._flash_btn.pack(side="left", padx=2, pady=4)
+        self._flash_btn.pack(side="left", padx=2)
 
         self._af_img = ctk.CTkImage(af_icon(False), size=(32, 32))
         self._af_btn = ctk.CTkButton(
@@ -302,17 +298,7 @@ class ScannerApp:
             width=50, height=64, compound="top",
             command=self._do_af,
         )
-        self._af_btn.pack(side="left", padx=2, pady=4)
-
-        self._zoom_img = ctk.CTkImage(zoom_icon(False), size=(32, 32))
-        self._zoom_btn = ctk.CTkButton(
-            left, image=self._zoom_img, text="Zoom",
-            font=ctk.CTkFont(size=9), text_color=TEXT_DIM,
-            fg_color="transparent", hover_color=SURFACE2,
-            width=50, height=64, compound="top",
-            command=self._toggle_zoom,
-        )
-        self._zoom_btn.pack(side="left", padx=2, pady=4)
+        self._af_btn.pack(side="left", padx=2)
 
         # center: shutter button
         self._shutter_img = ImageTk.PhotoImage(shutter_ring(64))
@@ -323,13 +309,9 @@ class ScannerApp:
         self._shutter_cv.place(relx=0.5, rely=0.5, anchor="center")
         self._shutter_cv.bind("<Button-1>", lambda e: self._do_capture())
 
-        # right side: name field + status, vertically centered and right-aligned
+        # right: name field + status — placed at right, vertically centered
         right = ctk.CTkFrame(controls, fg_color="transparent")
-        right.pack(side="right", padx=(0, 16), fill="y")
-
-        # vertical centering wrapper
-        spacer_top = ctk.CTkFrame(right, fg_color="transparent")
-        spacer_top.pack(expand=True)
+        right.place(relx=1.0, rely=0.5, anchor="e", x=-16)
 
         name_row = ctk.CTkFrame(right, fg_color="transparent")
         name_row.pack()
@@ -342,7 +324,7 @@ class ScannerApp:
         self._prefix_var = tk.StringVar(value="scan")
         self._prefix_entry = ctk.CTkEntry(
             name_row, textvariable=self._prefix_var,
-            width=180, height=28, font=ctk.CTkFont(size=12),
+            width=160, height=28, font=ctk.CTkFont(size=12),
             fg_color=SURFACE2, border_color=DIVIDER, text_color=TEXT_BRIGHT,
         )
         self._prefix_entry.pack(side="left")
@@ -352,9 +334,6 @@ class ScannerApp:
             font=ctk.CTkFont(size=10), text_color=TEXT_DIM,
         )
         self._status_label.pack(pady=(2, 0))
-
-        spacer_bot = ctk.CTkFrame(right, fg_color="transparent")
-        spacer_bot.pack(expand=True)
 
         # ── divider ──
         ctk.CTkFrame(self.root, fg_color=DIVIDER, height=1, corner_radius=0).pack(fill="x")
@@ -417,45 +396,6 @@ class ScannerApp:
     def _on_disconnect(self):
         self._set_status("Disconnected — replug USB")
 
-    # ── zoom toggle (5x sensor zoom via eoszoom) ───────────────────────────
-
-    def _toggle_zoom(self):
-        self.zoomed = not self.zoomed
-        self._zoom_img = ctk.CTkImage(zoom_icon(self.zoomed), size=(32, 32))
-        self._zoom_btn.configure(
-            image=self._zoom_img,
-            text="5x" if self.zoomed else "Zoom",
-            text_color=GREEN if self.zoomed else TEXT_DIM,
-        )
-        self._set_status("Zooming in…" if self.zoomed else "Zooming out…")
-
-        want_zoom = self.zoomed
-
-        def zoom_job(cam):
-            # eoszoom: "1" = normal, "5" = 5x magnified center crop
-            # try string first (most common), fall back to int
-            cfg = cam.get_config()
-            ez = cfg.get_child_by_name("eoszoom")
-            val = "5" if want_zoom else "1"
-            try:
-                ez.set_value(val)
-                cam.set_single_config("eoszoom", ez)
-            except gp.GPhoto2Error:
-                cfg = cam.get_config()
-                ez = cfg.get_child_by_name("eoszoom")
-                ez.set_value(int(val))
-                cam.set_single_config("eoszoom", ez)
-            time.sleep(0.3)
-
-        def after():
-            self._set_status("5x zoom" if want_zoom else "Ready")
-
-        def run():
-            done = self._cam.run(zoom_job)
-            done.wait()
-            self.root.after(0, after)
-
-        threading.Thread(target=run, daemon=True).start()
 
     # ── flash ─────────────────────────────────────────────────────────────────
 

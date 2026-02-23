@@ -733,7 +733,7 @@ class QuickCaptureApp:
 
             lbl = ctk.CTkLabel(pair, image=photo, text="", fg_color="transparent")
             lbl.pack(side="left", padx=(4, 2))
-            lbl.bind("<Button-1>", lambda e, p=str(path): subprocess.Popen(["open", p]))
+            lbl.bind("<Button-1>", lambda e, p=path: self._open_image_popup(Image.open(p)))
 
             # placeholder shown while crop is processing
             crop_lbl = ctk.CTkLabel(

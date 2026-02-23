@@ -55,36 +55,35 @@ def find_and_extract_documents(pil_img):
     if not results or len(results) == 0:
         return []
 
-    w, h   = pil_img.size
+    obs = results[0]
+    if obs.confidence() < 0.5:
+        return []
+
+    # Get corners (normalized coords, origin bottom-left)
+    tl = obs.topLeft()
+    tr = obs.topRight()
+    br = obs.bottomRight()
+    bl = obs.bottomLeft()
+
+    w, h = pil_img.size
+    corners = np.array([
+        [tl.x * w, (1 - tl.y) * h],
+        [tr.x * w, (1 - tr.y) * h],
+        [br.x * w, (1 - br.y) * h],
+        [bl.x * w, (1 - bl.y) * h],
+    ], dtype=np.float32)
+
+    # Perspective warp
     cv_img = np.array(pil_img)
-    crops  = []
+    width = int(max(np.linalg.norm(corners[1] - corners[0]), np.linalg.norm(corners[2] - corners[3])))
+    height = int(max(np.linalg.norm(corners[3] - corners[0]), np.linalg.norm(corners[2] - corners[1])))
+    if width < 50 or height < 50:
+        return []
 
-    for obs in results:
-        if obs.confidence() < 0.5:
-            continue
-
-        tl, tr = obs.topLeft(), obs.topRight()
-        br, bl = obs.bottomRight(), obs.bottomLeft()
-        corners = np.array([
-            [tl.x * w, (1 - tl.y) * h],
-            [tr.x * w, (1 - tr.y) * h],
-            [br.x * w, (1 - br.y) * h],
-            [bl.x * w, (1 - bl.y) * h],
-        ], dtype=np.float32)
-
-        width  = int(max(np.linalg.norm(corners[1] - corners[0]),
-                         np.linalg.norm(corners[2] - corners[3])))
-        height = int(max(np.linalg.norm(corners[3] - corners[0]),
-                         np.linalg.norm(corners[2] - corners[1])))
-        if width < 50 or height < 50:
-            continue
-
-        dst    = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
-        M      = cv2.getPerspectiveTransform(corners, dst)
-        warped = cv2.warpPerspective(cv_img, M, (width, height))
-        crops.append(Image.fromarray(warped))
-
-    return crops
+    dst = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
+    M = cv2.getPerspectiveTransform(corners, dst)
+    warped = cv2.warpPerspective(cv_img, M, (width, height))
+    return [Image.fromarray(warped)]
 
 # ── State ──────────────────────────────────────────────────────────────────────
 

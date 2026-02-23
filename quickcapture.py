@@ -156,36 +156,31 @@ def _crop_document(pil_img):
     if not results or len(results) == 0:
         return []
 
-    w, h   = pil_img.size
+    obs = results[0]
+    if obs.confidence() < 0.5:
+        return []
+
+    tl, tr, br, bl = obs.topLeft(), obs.topRight(), obs.bottomRight(), obs.bottomLeft()
+    w, h = pil_img.size
+    corners = np.array([
+        [tl.x * w, (1 - tl.y) * h],
+        [tr.x * w, (1 - tr.y) * h],
+        [br.x * w, (1 - br.y) * h],
+        [bl.x * w, (1 - bl.y) * h],
+    ], dtype=np.float32)
+
     cv_img = np.array(pil_img)
-    crops  = []
+    width  = int(max(np.linalg.norm(corners[1] - corners[0]),
+                     np.linalg.norm(corners[2] - corners[3])))
+    height = int(max(np.linalg.norm(corners[3] - corners[0]),
+                     np.linalg.norm(corners[2] - corners[1])))
+    if width < 50 or height < 50:
+        return []
 
-    for obs in results:
-        if obs.confidence() < 0.5:
-            continue
-
-        tl, tr = obs.topLeft(), obs.topRight()
-        br, bl = obs.bottomRight(), obs.bottomLeft()
-        corners = np.array([
-            [tl.x * w, (1 - tl.y) * h],
-            [tr.x * w, (1 - tr.y) * h],
-            [br.x * w, (1 - br.y) * h],
-            [bl.x * w, (1 - bl.y) * h],
-        ], dtype=np.float32)
-
-        width  = int(max(np.linalg.norm(corners[1] - corners[0]),
-                         np.linalg.norm(corners[2] - corners[3])))
-        height = int(max(np.linalg.norm(corners[3] - corners[0]),
-                         np.linalg.norm(corners[2] - corners[1])))
-        if width < 50 or height < 50:
-            continue
-
-        dst    = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
-        M      = cv2.getPerspectiveTransform(corners, dst)
-        warped = cv2.warpPerspective(cv_img, M, (width, height))
-        crops.append(Image.fromarray(warped))
-
-    return crops
+    dst    = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
+    M      = cv2.getPerspectiveTransform(corners, dst)
+    warped = cv2.warpPerspective(cv_img, M, (width, height))
+    return [Image.fromarray(warped)]
 
 
 # ── camera thread ─────────────────────────────────────────────────────────────
@@ -749,27 +744,22 @@ class QuickCaptureApp:
             crop_lbl.pack(side="left", padx=(0, 4))
 
             threading.Thread(
-                target=self._do_crop, args=(path, pair, crop_lbl), daemon=True
+                target=self._do_crop, args=(path, crop_lbl), daemon=True
             ).start()
         except Exception as e:
             print(f"Thumb: {e}")
 
-    def _do_crop(self, path, pair, crop_lbl):
-        """Background thread: detect documents, update placeholders on main thread."""
+    def _do_crop(self, path, crop_lbl):
+        """Background thread: detect document, update crop placeholder on main thread."""
         try:
             crops = _crop_document(Image.open(path))
             if crops:
+                # save crop alongside originals in processed/ subfolder
                 processed_dir = SAVE_DIR / "processed"
                 processed_dir.mkdir(exist_ok=True)
-                stem = Path(path).stem
-                for i, crop_img in enumerate(crops):
-                    suffix    = f"_crop{i+1}" if len(crops) > 1 else "_crop"
-                    crop_path = processed_dir / f"{stem}{suffix}.jpg"
-                    crop_img.save(crop_path, "JPEG", quality=95)
-                    if i == 0:
-                        self.root.after(0, self._show_crop_success, crop_lbl, crop_img, crop_path)
-                    else:
-                        self.root.after(0, self._add_crop_thumb, pair, crop_img, crop_path)
+                crop_path = processed_dir / f"{Path(path).stem}_crop.jpg"
+                crops[0].save(crop_path, "JPEG", quality=95)
+                self.root.after(0, self._show_crop_success, crop_lbl, crops[0], crop_path)
             else:
                 self.root.after(0, self._show_crop_failed, crop_lbl)
         except Exception:
@@ -792,12 +782,6 @@ class QuickCaptureApp:
     def _show_crop_failed(self, crop_lbl):
         crop_lbl.configure(fg_color="#3a1010", text="✗",
                            text_color=RED, font=ctk.CTkFont(size=18))
-
-    def _add_crop_thumb(self, pair, crop_img, crop_path):
-        """Add an extra crop thumbnail to an existing pair frame (2nd, 3rd… crops)."""
-        new_lbl = ctk.CTkLabel(pair, text="", fg_color="transparent")
-        new_lbl.pack(side="left", padx=(0, 4))
-        self._show_crop_success(new_lbl, crop_img, crop_path)
 
     def _open_image_popup(self, img):
         """Show a crop image in a floating window. Click or Escape to close."""

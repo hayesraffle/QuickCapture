@@ -2,7 +2,7 @@
 import glob
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+datas = [('process_scans.py', '.')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('gphoto2')

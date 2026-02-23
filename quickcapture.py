@@ -120,6 +120,69 @@ def shutter_ring(size=72, pressed=False):
     return _hq(size, draw)
 
 
+# ── document crop (Apple Vision + OpenCV) ────────────────────────────────────
+
+def _prewarm_crop():
+    """Pre-import heavy crop libs at startup so first detection is instant."""
+    try:
+        import numpy, cv2, Vision, Quartz
+        from Foundation import NSURL
+    except Exception:
+        pass
+
+def _crop_document(pil_img):
+    """Detect and perspective-correct a document. Returns list of PIL Images."""
+    import numpy as np, cv2, Vision, Quartz, tempfile, os
+    from Foundation import NSURL
+
+    tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
+    try:
+        pil_img.save(tmp.name, 'JPEG', quality=95)
+        url      = NSURL.fileURLWithPath_(tmp.name)
+        ci_image = Quartz.CIImage.imageWithContentsOfURL_(url)
+    finally:
+        os.unlink(tmp.name)
+
+    if ci_image is None:
+        return []
+
+    handler = Vision.VNImageRequestHandler.alloc().initWithCIImage_options_(ci_image, None)
+    request = Vision.VNDetectDocumentSegmentationRequest.alloc().init()
+    success, _ = handler.performRequests_error_([request], None)
+    if not success:
+        return []
+
+    results = request.results()
+    if not results or len(results) == 0:
+        return []
+
+    obs = results[0]
+    if obs.confidence() < 0.5:
+        return []
+
+    tl, tr, br, bl = obs.topLeft(), obs.topRight(), obs.bottomRight(), obs.bottomLeft()
+    w, h = pil_img.size
+    corners = np.array([
+        [tl.x * w, (1 - tl.y) * h],
+        [tr.x * w, (1 - tr.y) * h],
+        [br.x * w, (1 - br.y) * h],
+        [bl.x * w, (1 - bl.y) * h],
+    ], dtype=np.float32)
+
+    cv_img = np.array(pil_img)
+    width  = int(max(np.linalg.norm(corners[1] - corners[0]),
+                     np.linalg.norm(corners[2] - corners[3])))
+    height = int(max(np.linalg.norm(corners[3] - corners[0]),
+                     np.linalg.norm(corners[2] - corners[1])))
+    if width < 50 or height < 50:
+        return []
+
+    dst    = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
+    M      = cv2.getPerspectiveTransform(corners, dst)
+    warped = cv2.warpPerspective(cv_img, M, (width, height))
+    return [Image.fromarray(warped)]
+
+
 # ── camera thread ─────────────────────────────────────────────────────────────
 
 class CameraThread:
@@ -310,6 +373,7 @@ class QuickCaptureApp:
             get_prefix    = self._get_prefix,
             get_rotation  = lambda: self._rotation,
         )
+        threading.Thread(target=_prewarm_crop, daemon=True).start()
 
     def run(self):
         self.root.mainloop()
@@ -321,9 +385,14 @@ class QuickCaptureApp:
 
     def _on_done(self):
         SAVE_DIR.mkdir(parents=True, exist_ok=True)
-        script = Path(__file__).parent / "process_scans.py"
+        if getattr(sys, 'frozen', False):
+            script = Path(sys._MEIPASS) / "process_scans.py"
+            python = "python3"
+        else:
+            script = Path(__file__).parent / "process_scans.py"
+            python = sys.executable
         subprocess.Popen(
-            [sys.executable, str(script), str(SAVE_DIR)],
+            [python, str(script), str(SAVE_DIR)],
             start_new_session=True,
         )
 
@@ -650,7 +719,6 @@ class QuickCaptureApp:
             thumb_w = max(1, int(THUMB_H * w / h))
             img = img.resize((thumb_w, THUMB_H), Image.LANCZOS)
 
-            # rounded corners
             mask = Image.new("L", (thumb_w, THUMB_H), 0)
             ImageDraw.Draw(mask).rounded_rectangle(
                 [0, 0, thumb_w-1, THUMB_H-1], radius=10, fill=255)
@@ -659,12 +727,55 @@ class QuickCaptureApp:
             photo = ctk.CTkImage(img, size=(thumb_w, THUMB_H))
             self._thumb_refs.append(photo)
 
-            lbl = ctk.CTkLabel(self._roll_scroll, image=photo, text="",
-                               fg_color="transparent")
-            lbl.pack(side="left", padx=4, pady=4)
+            # pair container groups original + crop side by side
+            pair = ctk.CTkFrame(self._roll_scroll, fg_color="transparent")
+            pair.pack(side="left", padx=2, pady=4)
+
+            lbl = ctk.CTkLabel(pair, image=photo, text="", fg_color="transparent")
+            lbl.pack(side="left", padx=(4, 2))
             lbl.bind("<Button-1>", lambda e, p=str(path): subprocess.Popen(["open", p]))
+
+            # placeholder shown while crop is processing
+            crop_lbl = ctk.CTkLabel(
+                pair, text="···", fg_color=SURFACE2,
+                width=THUMB_H, height=THUMB_H, corner_radius=10,
+                text_color=TEXT_DIM, font=ctk.CTkFont(size=14),
+            )
+            crop_lbl.pack(side="left", padx=(0, 4))
+
+            threading.Thread(
+                target=self._do_crop, args=(path, crop_lbl), daemon=True
+            ).start()
         except Exception as e:
             print(f"Thumb: {e}")
+
+    def _do_crop(self, path, crop_lbl):
+        """Background thread: detect document, update crop placeholder on main thread."""
+        try:
+            crops = _crop_document(Image.open(path))
+            if crops:
+                self.root.after(0, self._show_crop_success, crop_lbl, crops[0])
+            else:
+                self.root.after(0, self._show_crop_failed, crop_lbl)
+        except Exception:
+            self.root.after(0, self._show_crop_failed, crop_lbl)
+
+    def _show_crop_success(self, crop_lbl, crop_img):
+        w, h    = crop_img.size
+        thumb_w = max(1, int(THUMB_H * w / h))
+        thumb   = crop_img.resize((thumb_w, THUMB_H), Image.LANCZOS)
+        mask = Image.new("L", (thumb_w, THUMB_H), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, thumb_w-1, THUMB_H-1], radius=10, fill=255)
+        thumb.putalpha(mask)
+        photo = ctk.CTkImage(thumb, size=(thumb_w, THUMB_H))
+        self._thumb_refs.append(photo)
+        crop_lbl.configure(image=photo, text="", fg_color="transparent",
+                           width=thumb_w, height=THUMB_H)
+
+    def _show_crop_failed(self, crop_lbl):
+        crop_lbl.configure(fg_color="#3a1010", text="✗",
+                           text_color=RED, font=ctk.CTkFont(size=18))
 
 
 if __name__ == "__main__":

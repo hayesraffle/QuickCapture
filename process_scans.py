@@ -14,11 +14,6 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 from PIL import Image, ImageOps
-import numpy as np
-import cv2
-import Vision
-import Quartz
-from Foundation import NSURL
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -33,6 +28,11 @@ THUMB_SIZE   = (400, 400)
 
 def find_and_extract_documents(pil_img):
     """Use Apple's VNDetectDocumentSegmentationRequest to find and extract documents."""
+    import numpy as np
+    import cv2
+    import Vision
+    import Quartz
+    from Foundation import NSURL
     # Write to temp file for Vision framework
     tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
     try:
@@ -575,7 +575,7 @@ class Handler(BaseHTTPRequestHandler):
                      "name":     r.get("name", Path(r["path"]).name),
                      "deleted":  r.get("deleted", False)}
                     for r in STATE.results
-                ]
+                ],
             }
             html  = HTML.replace("/*INJECT_STATE*/null/*END*/", json.dumps(page_state))
             data  = html.encode()

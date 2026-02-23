@@ -117,8 +117,14 @@ def heal_paths(results):
 # ── Auto-process folder ───────────────────────────────────────────────────────
 
 def auto_process_folder(scan_dir):
-    """Process all unprocessed JPEGs in scan_dir, newest first."""
+    """Process all unprocessed JPEGs in scan_dir, newest first.
+
+    If quickcapture already saved crops to processed/, import those
+    instead of re-running detection.
+    """
     scan_dir = Path(scan_dir)
+    processed_dir = scan_dir / "processed"
+
     # Collect all top-level JPEGs (exclude processed/ subdir)
     all_jpgs = sorted(
         [f for f in scan_dir.glob("*.jpg") if f.is_file()],
@@ -139,6 +145,9 @@ def auto_process_folder(scan_dir):
         if src:
             already.add(src)
 
+    # Also track crop filenames already in results
+    already_crops = {r.get("name") for r in STATE.results if r.get("name")}
+
     unprocessed = [f for f in all_jpgs if f.name not in already]
     if not unprocessed:
         print("No new images to process.")
@@ -147,12 +156,41 @@ def auto_process_folder(scan_dir):
     print(f"Auto-processing {len(unprocessed)} new image(s)...")
     for img_path in unprocessed:
         print(f"  {img_path.name}")
-        file_bytes = img_path.read_bytes()
-        entries = process_upload(img_path.name, file_bytes)
-        if entries:
-            STATE.add(entries)
+        stem = img_path.stem
+
+        # Check if quickcapture already saved crops for this image
+        existing_crops = sorted(processed_dir.glob(f"{stem}_crop*.jpg")) if processed_dir.exists() else []
+        existing_crops = [c for c in existing_crops if c.name not in already_crops]
+
+        if existing_crops:
+            # Import pre-made crops instead of re-detecting
+            entries = []
+            for crop_path in existing_crops:
+                # Copy to OUTPUT_DIR if it's different from processed_dir
+                if OUTPUT_DIR.resolve() != processed_dir.resolve():
+                    out = _unique_path(OUTPUT_DIR, crop_path.name)
+                    import shutil
+                    shutil.copy2(crop_path, out)
+                else:
+                    out = crop_path
+                entries.append({
+                    "path":     str(out),
+                    "name":     out.name,
+                    "source":   img_path.name,
+                    "rotation": 0,
+                    "deleted":  False,
+                })
+            if entries:
+                print(f"    imported {len(entries)} existing crop(s)")
+                STATE.add(entries)
         else:
-            print(f"    (no photos detected)")
+            # No pre-made crops — run detection
+            file_bytes = img_path.read_bytes()
+            entries = process_upload(img_path.name, file_bytes)
+            if entries:
+                STATE.add(entries)
+            else:
+                print(f"    (no photos detected)")
     print("Done.")
 
 # ── Port check ─────────────────────────────────────────────────────────────────

@@ -45,17 +45,6 @@ def _hq(size, fn):
     fn(d, big, sc)
     return img.resize((size, size), Image.LANCZOS)
 
-def flash_icon(on, size=28):
-    def draw(d, s, sc):
-        # no background — _make_round_btn provides the circle
-        cx, color = s/2, "#000000" if on else "#ffffff"
-        d.polygon([
-            (cx + 1*sc, 4*sc), (cx - 4*sc, s//2 + 1*sc),
-            (cx + 0*sc, s//2 + 1*sc), (cx - 1*sc, s - 4*sc),
-            (cx + 4*sc, s//2 - 1*sc), (cx + 0*sc, s//2 - 1*sc),
-        ], fill=color)
-    return _hq(size, draw)
-
 def af_icon(active, size=32):
     def draw(d, s, sc):
         # no background — _make_round_btn provides the circle
@@ -302,7 +291,6 @@ class QuickCaptureApp:
         self.root.minsize(700, 520)
 
         self.capture_count = 0
-        self.flash_on      = False
         self._rotation     = 0  # 0, 90, 180, 270
         self._raw_frame    = None
         self._thumb_refs   = []
@@ -379,14 +367,6 @@ class QuickCaptureApp:
         # left side: flash + focus buttons
         left = ctk.CTkFrame(controls, fg_color="transparent")
         left.place(relx=0.0, rely=0.5, anchor="w")
-
-        self._flash_pil = _make_round_btn(flash_icon(False), 44)
-        self._flash_photo = ImageTk.PhotoImage(self._flash_pil)
-        self._flash_cv = tk.Canvas(left, width=44, height=44, bg=SURFACE,
-                                   highlightthickness=0)
-        self._flash_cv.create_image(22, 22, image=self._flash_photo)
-        self._flash_cv.pack(side="left", padx=(0, 10))
-        self._flash_cv.bind("<Button-1>", lambda e: self._toggle_flash())
 
         self._af_pil = _make_round_btn(af_icon(False), 44)
         self._af_photo = ImageTk.PhotoImage(self._af_pil)
@@ -529,37 +509,6 @@ class QuickCaptureApp:
             self._render_frame(self._raw_frame)
 
 
-    # ── flash ─────────────────────────────────────────────────────────────────
-
-    def _toggle_flash(self):
-        self.flash_on = not self.flash_on
-        self._flash_pil = _make_round_btn(flash_icon(self.flash_on), 44,
-                                          bg=YELLOW if self.flash_on else None)
-        self._flash_photo = ImageTk.PhotoImage(self._flash_pil)
-        self._flash_cv.delete("all")
-        self._flash_cv.create_image(22, 22, image=self._flash_photo)
-        self._set_status("Flash on" if self.flash_on else "Flash off")
-
-        want_on = self.flash_on
-
-        def flash_job(cam):
-            # switch between Green (auto flash) and Flash Off exposure mode
-            cfg = cam.get_config()
-            mode = cfg.get_child_by_name("autoexposuremode")
-            mode.set_value("Green" if want_on else "Flash Off")
-            cam.set_single_config("autoexposuremode", mode)
-            time.sleep(0.3)
-
-        def after():
-            self._set_status("Flash on" if want_on else "Flash off")
-
-        def run():
-            done = self._cam.run(flash_job)
-            done.wait()
-            self.root.after(0, after)
-
-        threading.Thread(target=run, daemon=True).start()
-
     # ── autofocus ─────────────────────────────────────────────────────────────
 
     def _update_af_btn(self, active):
@@ -606,39 +555,33 @@ class QuickCaptureApp:
         rot = self._rotation  # capture current rotation at time of click
 
         def capture_job(cam):
-            for val in ("Press Half","Press Full","Release Full","Release Half"):
-                cfg = cam.get_config()
-                r = cfg.get_child_by_name("eosremoterelease")
-                r.set_value(val)
-                cam.set_single_config("eosremoterelease", r)
-                time.sleep(0.25)
+            # Exit Live View so the pop-up flash can fire (if it's up)
+            cfg = cam.get_config()
+            cfg.get_child_by_name("viewfinder").set_value(0)
+            cam.set_config(cfg)
+            time.sleep(0.5)
 
-            deadline = time.time() + 8
-            while time.time() < deadline:
-                et, ed = cam.wait_for_event(300)
-                if et == gp.GP_EVENT_FILE_ADDED:
-                    cf = cam.file_get(ed.folder, ed.name, gp.GP_FILE_TYPE_NORMAL)
-                    ts = time.strftime("%Y-%m-%d_%H-%M-%S")
-                    ext = Path(ed.name).suffix
-                    pfx = self._get_prefix()
-                    dest = SAVE_DIR / f"{pfx}_{ts}{ext}"
-                    cf.save(str(dest))
-                    img = Image.open(str(dest))
-                    if rot:
-                        img = img.rotate(rot, expand=True)
-                    exif = Exif()
-                    exif[0x0112] = 1  # Orientation: pixels are correct
-                    img.save(str(dest), quality=95, exif=exif.tobytes())
-                    self._on_file(dest)
+            path = cam.capture(gp.GP_CAPTURE_IMAGE)
+            cf = cam.file_get(path.folder, path.name, gp.GP_FILE_TYPE_NORMAL)
+            ts = time.strftime("%Y-%m-%d_%H-%M-%S")
+            ext = Path(path.name).suffix
+            pfx = self._get_prefix()
+            dest = SAVE_DIR / f"{pfx}_{ts}{ext}"
+            cf.save(str(dest))
 
-                    time.sleep(0.8)
-                    cfg = cam.get_config()
-                    cfg.get_child_by_name("viewfinder").set_value(1)
-                    cam.set_config(cfg)
-                    time.sleep(0.5)
-                    return
+            img = Image.open(str(dest))
+            if rot:
+                img = img.rotate(rot, expand=True)
+            exif = Exif()
+            exif[0x0112] = 1  # Orientation: pixels are correct
+            img.save(str(dest), quality=95, exif=exif.tobytes())
+            self._on_file(dest)
 
-            raise RuntimeError("Timed out — no image received")
+            time.sleep(0.8)
+            cfg = cam.get_config()
+            cfg.get_child_by_name("viewfinder").set_value(1)
+            cam.set_config(cfg)
+            time.sleep(0.5)
 
         def run():
             done = self._cam.run(capture_job)

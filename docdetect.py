@@ -46,22 +46,21 @@ def detect_and_extract_documents(pil_img, max_documents=10):
     rect_obs = _detect_rectangles(ci_image, max_documents)
     rect_obs = _filter_overlapping(rect_obs)
 
-    # Step 3: Validate each rectangle as a document
+    # Step 3: Perspective-correct each rectangle
     cv_img = np.array(pil_img)
     if len(rect_obs) >= 2:
-        validated = []
+        documents = []
         for obs in rect_obs:
             if obs.confidence() < 0.5:
                 continue
-            if _validate_as_document(pil_img, obs, w, h):
-                warped = _perspective_correct(obs, cv_img, w, h)
-                if warped is not None:
-                    cx = (obs.topLeft().x + obs.topRight().x) / 2
-                    validated.append((cx, Image.fromarray(warped)))
+            warped = _perspective_correct(obs, cv_img, w, h)
+            if warped is not None:
+                cx = (obs.topLeft().x + obs.topRight().x) / 2
+                documents.append((cx, Image.fromarray(warped)))
 
-        if len(validated) >= 2:
-            validated.sort(key=lambda pair: pair[0])
-            return [img for _, img in validated]
+        if len(documents) >= 2:
+            documents.sort(key=lambda pair: pair[0])
+            return [img for _, img in documents]
 
     # Step 4: Fallback — use the single document segmentation result
     warped = _perspective_correct(gate_obs, cv_img, w, h)
@@ -106,55 +105,6 @@ def _detect_rectangles(ci_image, max_obs):
     results = request.results()
     return list(results) if results else []
 
-
-def _validate_as_document(pil_img, obs, img_w, img_h):
-    """Crop the rectangle region and check if document segmentation finds a document."""
-    import numpy as np
-    import Vision
-    import Quartz
-    from Foundation import NSURL
-
-    tl = obs.topLeft()
-    tr = obs.topRight()
-    br = obs.bottomRight()
-    bl = obs.bottomLeft()
-
-    corners = np.array([
-        [tl.x * img_w, (1 - tl.y) * img_h],
-        [tr.x * img_w, (1 - tr.y) * img_h],
-        [br.x * img_w, (1 - br.y) * img_h],
-        [bl.x * img_w, (1 - bl.y) * img_h],
-    ], dtype=np.float32)
-
-    # Bounding box with padding
-    x_min = max(0, int(min(corners[:, 0])) - 20)
-    y_min = max(0, int(min(corners[:, 1])) - 20)
-    x_max = min(img_w, int(max(corners[:, 0])) + 20)
-    y_max = min(img_h, int(max(corners[:, 1])) + 20)
-
-    crop = pil_img.crop((x_min, y_min, x_max, y_max))
-
-    tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-    try:
-        crop.save(tmp.name, 'JPEG', quality=95)
-        url = NSURL.fileURLWithPath_(tmp.name)
-        ci_image = Quartz.CIImage.imageWithContentsOfURL_(url)
-    finally:
-        os.unlink(tmp.name)
-
-    if ci_image is None:
-        return False
-
-    handler = Vision.VNImageRequestHandler.alloc().initWithCIImage_options_(ci_image, None)
-    request = Vision.VNDetectDocumentSegmentationRequest.alloc().init()
-    success, error = handler.performRequests_error_([request], None)
-    if not success:
-        return False
-
-    results = request.results()
-    if not results or len(results) == 0:
-        return False
-    return results[0].confidence() >= 0.5
 
 
 def _perspective_correct(obs, cv_img, img_w, img_h):

@@ -6,7 +6,7 @@ Single camera thread with command queue (darktable-style architecture)
 
 import customtkinter as ctk
 import tkinter as tk
-import subprocess, threading, time, io, queue, sys
+import subprocess, threading, time, io, queue, sys, webbrowser
 from pathlib import Path
 from PIL import Image, ImageTk, ImageDraw
 from PIL.Image import Exif
@@ -317,22 +317,21 @@ class QuickCaptureApp:
         self.root.mainloop()
 
     def _on_quit(self):
+        if hasattr(self, '_review_server') and self._review_server:
+            self._review_server.stop()
         if self._cam:
             self._cam.stop()
         self.root.destroy()
 
     def _on_done(self):
         SAVE_DIR.mkdir(parents=True, exist_ok=True)
-        if getattr(sys, 'frozen', False):
-            script = Path(sys._MEIPASS) / "process_scans.py"
-            python = "python3"
-        else:
-            script = Path(__file__).parent / "process_scans.py"
-            python = sys.executable
-        subprocess.Popen(
-            [python, str(script), str(SAVE_DIR)],
-            start_new_session=True,
-        )
+        if not hasattr(self, '_review_server') or self._review_server is None:
+            from process_scans import ReviewServer
+            self._review_server = ReviewServer(str(SAVE_DIR), embedded=True)
+        self._review_server.auto_process()
+        if self._review_server._server is None:
+            self._review_server.start()
+        webbrowser.open(f'http://127.0.0.1:{self._review_server.port}/')
 
     def _get_prefix(self):
         return self._prefix_var.get().strip() or "scan"

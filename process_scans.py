@@ -17,11 +17,7 @@ from PIL import Image, ImageOps
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-SCAN_DIR     = None          # set via sys.argv[1] or left None for drag-drop only
 BASE_DIR     = Path(__file__).parent
-OUTPUT_DIR   = BASE_DIR / "output"       # default; overridden if SCAN_DIR is set
-RESULTS_FILE = OUTPUT_DIR / "results.json"  # derived in main()
-PORT         = 8765
 THUMB_SIZE   = (400, 400)
 
 # ── Detection + perspective correction (Apple Vision) ─────────────────────────
@@ -31,21 +27,23 @@ from docdetect import detect_and_extract_documents as find_and_extract_documents
 # ── State ──────────────────────────────────────────────────────────────────────
 
 class AppState:
-    def __init__(self):
-        self._lock   = threading.Lock()
-        self.results = []
+    def __init__(self, output_dir, results_file):
+        self._lock       = threading.Lock()
+        self.results     = []
+        self.output_dir  = Path(output_dir)
+        self.results_file = Path(results_file)
 
     def load(self):
-        if RESULTS_FILE.exists():
+        if self.results_file.exists():
             try:
-                self.results = json.loads(RESULTS_FILE.read_text())
+                self.results = json.loads(self.results_file.read_text())
                 # normalise legacy entries that lack 'name'
                 for r in self.results:
                     if "name" not in r:
                         r["name"] = Path(r["path"]).name
             except Exception:
                 self.results = []
-        heal_paths(self.results)
+        heal_paths(self.results, self.output_dir)
         return self
 
     def add(self, entries):
@@ -58,10 +56,8 @@ class AppState:
             self._persist()
 
     def _persist(self):
-        OUTPUT_DIR.mkdir(exist_ok=True)
-        RESULTS_FILE.write_text(json.dumps(self.results, indent=2))
-
-STATE = AppState()
+        self.output_dir.mkdir(exist_ok=True)
+        self.results_file.write_text(json.dumps(self.results, indent=2))
 
 # ── Processing ─────────────────────────────────────────────────────────────────
 
@@ -74,9 +70,10 @@ def _unique_path(directory, name):
         n += 1
     return out
 
-def process_upload(filename, file_bytes):
+def process_upload(filename, file_bytes, output_dir):
     """Detect documents in image, perspective-correct, and save. Returns list of result dicts."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
     img = Image.open(io.BytesIO(file_bytes))
     img.load()
     img = ImageOps.exif_transpose(img)
@@ -88,7 +85,7 @@ def process_upload(filename, file_bytes):
     entries = []
     for idx, doc in enumerate(documents):
         label = f"_crop{idx+1}" if multi else ""
-        out   = _unique_path(OUTPUT_DIR, f"{stem}{label}.jpg")
+        out   = _unique_path(output_dir, f"{stem}{label}.jpg")
         doc.save(out, "JPEG", quality=95)
         entries.append({
             "path":     str(out),
@@ -99,8 +96,9 @@ def process_upload(filename, file_bytes):
         })
     return entries
 
-def heal_paths(results):
-    index = {p.name: p for p in OUTPUT_DIR.rglob("*.jpg")} if OUTPUT_DIR.exists() else {}
+def heal_paths(results, output_dir):
+    output_dir = Path(output_dir)
+    index = {p.name: p for p in output_dir.rglob("*.jpg")} if output_dir.exists() else {}
     fixed = 0
     for r in results:
         if r.get("deleted"):
@@ -116,13 +114,14 @@ def heal_paths(results):
 
 # ── Auto-process folder ───────────────────────────────────────────────────────
 
-def auto_process_folder(scan_dir):
+def auto_process_folder(scan_dir, state, output_dir):
     """Process all unprocessed JPEGs in scan_dir, newest first.
 
     If quickcapture already saved crops to processed/, import those
     instead of re-running detection.
     """
     scan_dir = Path(scan_dir)
+    output_dir = Path(output_dir)
     processed_dir = scan_dir / "processed"
 
     # Collect all top-level JPEGs (exclude processed/ subdir)
@@ -140,13 +139,13 @@ def auto_process_folder(scan_dir):
 
     # Find already-processed source filenames
     already = set()
-    for r in STATE.results:
+    for r in state.results:
         src = r.get("source")
         if src:
             already.add(src)
 
     # Also track crop filenames already in results
-    already_crops = {r.get("name") for r in STATE.results if r.get("name")}
+    already_crops = {r.get("name") for r in state.results if r.get("name")}
 
     unprocessed = [f for f in all_jpgs if f.name not in already]
     if not unprocessed:
@@ -166,9 +165,9 @@ def auto_process_folder(scan_dir):
             # Import pre-made crops instead of re-detecting
             entries = []
             for crop_path in existing_crops:
-                # Copy to OUTPUT_DIR if it's different from processed_dir
-                if OUTPUT_DIR.resolve() != processed_dir.resolve():
-                    out = _unique_path(OUTPUT_DIR, crop_path.name)
+                # Copy to output_dir if it's different from processed_dir
+                if output_dir.resolve() != processed_dir.resolve():
+                    out = _unique_path(output_dir, crop_path.name)
                     import shutil
                     shutil.copy2(crop_path, out)
                 else:
@@ -182,13 +181,13 @@ def auto_process_folder(scan_dir):
                 })
             if entries:
                 print(f"    imported {len(entries)} existing crop(s)")
-                STATE.add(entries)
+                state.add(entries)
         else:
             # No pre-made crops — run detection
             file_bytes = img_path.read_bytes()
-            entries = process_upload(img_path.name, file_bytes)
+            entries = process_upload(img_path.name, file_bytes, output_dir)
             if entries:
-                STATE.add(entries)
+                state.add(entries)
             else:
                 print(f"    (no photos detected)")
     print("Done.")
@@ -346,6 +345,7 @@ body.has-photos #reset-btn { display: block; }
 <script>
 const STATE = /*INJECT_STATE*/null/*END*/;
 const results = STATE.results;
+const embedded = STATE.embedded || false;
 const dz = document.getElementById('dropzone');
 let saveTimer = null, confirmTimer = null;
 
@@ -512,10 +512,14 @@ document.addEventListener('click', () =>
 // ── Util ─────────────────────────────────────────────────────────────────────
 function setStatus(t, c) { const s = document.getElementById('status'); s.textContent = t; s.className = c; }
 function showNote(msg) { setStatus(msg, ''); setTimeout(() => setStatus('ready', ''), 4000); }
-new EventSource('/heartbeat');
+if (!embedded) new EventSource('/heartbeat');
 function doQuit() {
-  fetch('/quit', { method: 'POST' }).catch(() => {});
-  document.body.innerHTML = '<p style="text-align:center;margin-top:40vh;color:#666">Server stopped.</p>';
+  if (embedded) {
+    window.close();
+  } else {
+    fetch('/quit', { method: 'POST' }).catch(() => {});
+    document.body.innerHTML = '<p style="text-align:center;margin-top:40vh;color:#666">Server stopped.</p>';
+  }
 }
 </script>
 </body>
@@ -541,148 +545,192 @@ def parse_multipart(headers, body):
 
 # ── HTTP handler ───────────────────────────────────────────────────────────────
 
-class Handler(BaseHTTPRequestHandler):
+def _make_handler(review_server):
+    """Create a Handler class bound to a specific ReviewServer instance."""
 
-    def log_message(self, *a):
-        pass
+    class Handler(BaseHTTPRequestHandler):
 
-    def do_GET(self):
-        parsed = urlparse(self.path)
+        def log_message(self, *a):
+            pass
 
-        if parsed.path == "/":
-            page_state = {
-                "results": [
-                    {"rotation": r.get("rotation", 0),
-                     "name":     r.get("name", Path(r["path"]).name),
-                     "deleted":  r.get("deleted", False)}
-                    for r in STATE.results
-                ],
-            }
-            html  = HTML.replace("/*INJECT_STATE*/null/*END*/", json.dumps(page_state))
-            data  = html.encode()
-            self._respond(200, "text/html; charset=utf-8", data)
+        def do_GET(self):
+            state = review_server.state
+            parsed = urlparse(self.path)
 
-        elif parsed.path == "/heartbeat":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.end_headers()
-            self.server.sse_clients.add(self)
-            try:
-                while True:
-                    self.wfile.write(b": keepalive\n\n")
-                    self.wfile.flush()
-                    time.sleep(15)
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
-            finally:
-                self.server.sse_clients.discard(self)
+            if parsed.path == "/":
+                page_state = {
+                    "results": [
+                        {"rotation": r.get("rotation", 0),
+                         "name":     r.get("name", Path(r["path"]).name),
+                         "deleted":  r.get("deleted", False)}
+                        for r in state.results
+                    ],
+                    "embedded": review_server.embedded,
+                }
+                html  = HTML.replace("/*INJECT_STATE*/null/*END*/", json.dumps(page_state))
+                data  = html.encode()
+                self._respond(200, "text/html; charset=utf-8", data)
 
-        elif parsed.path.startswith("/thumb/"):
-            idx = int(parsed.path.split("/")[-1])
-            if idx >= len(STATE.results):
-                self.send_error(404); return
-            r = STATE.results[idx]
-            if r.get("deleted") or not Path(r["path"]).exists():
-                self.send_error(404); return
-            qs   = parse_qs(parsed.query)
-            rot  = int(qs.get("rot", ["0"])[0])
-            full = qs.get("full", ["0"])[0] == "1"
-            img  = Image.open(r["path"])
-            if rot:
-                img = img.rotate(-rot, expand=True)
-            if not full:
-                img.thumbnail(THUMB_SIZE, Image.LANCZOS)
+            elif parsed.path == "/heartbeat":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                self.server.sse_clients.add(self)
+                try:
+                    while True:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        time.sleep(15)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                finally:
+                    self.server.sse_clients.discard(self)
+
+            elif parsed.path.startswith("/thumb/"):
+                idx = int(parsed.path.split("/")[-1])
+                if idx >= len(state.results):
+                    self.send_error(404); return
+                r = state.results[idx]
+                if r.get("deleted") or not Path(r["path"]).exists():
+                    self.send_error(404); return
+                qs   = parse_qs(parsed.query)
+                rot  = int(qs.get("rot", ["0"])[0])
+                full = qs.get("full", ["0"])[0] == "1"
+                img  = Image.open(r["path"])
+                if rot:
+                    img = img.rotate(-rot, expand=True)
+                if not full:
+                    img.thumbnail(THUMB_SIZE, Image.LANCZOS)
+                else:
+                    img.thumbnail((1800, 1800), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, "JPEG", quality=85 if full else 82)
+                self._respond(200, "image/jpeg", buf.getvalue())
+
             else:
-                img.thumbnail((1800, 1800), Image.LANCZOS)
-            buf = io.BytesIO()
-            img.save(buf, "JPEG", quality=85 if full else 82)
-            self._respond(200, "image/jpeg", buf.getvalue())
+                self.send_error(404)
 
-        else:
-            self.send_error(404)
+        def do_POST(self):
+            state = review_server.state
+            output_dir = review_server.output_dir
+            length = int(self.headers.get("Content-Length", 0))
+            body   = self.rfile.read(length)
 
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body   = self.rfile.read(length)
+            if self.path == "/upload":
+                parts = parse_multipart(self.headers, body)
+                all_entries = []
+                for fname, data in parts:
+                    entries = process_upload(fname, data, output_dir)
+                    state.add(entries)
+                    for e in entries:
+                        idx = state.results.index(e)
+                        all_entries.append({
+                            "idx":      idx,
+                            "name":     e["name"],
+                            "rotation": 0,
+                        })
+                resp = json.dumps(all_entries).encode()
+                self._respond(200, "application/json", resp)
 
-        if self.path == "/upload":
-            parts = parse_multipart(self.headers, body)
-            all_entries = []
-            for fname, data in parts:
-                entries = process_upload(fname, data)
-                STATE.add(entries)
-                # Return index alongside each entry so JS can reference it
-                for e in entries:
-                    idx = STATE.results.index(e)
-                    all_entries.append({
-                        "idx":      idx,
-                        "name":     e["name"],
-                        "rotation": 0,
-                    })
-            resp = json.dumps(all_entries).encode()
-            self._respond(200, "application/json", resp)
+            elif self.path == "/save":
+                dirty = json.loads(body)  # {str(idx): degrees}
+                for idx_str, deg in dirty.items():
+                    i   = int(idx_str)
+                    deg = int(deg)
+                    if deg % 360 == 0 or i >= len(state.results):
+                        continue
+                    r = state.results[i]
+                    img = Image.open(r["path"])
+                    img = img.rotate(-deg, expand=True)
+                    img.save(r["path"], "JPEG", quality=95)
+                    r["rotation"] = 0
+                state.persist()
+                self._respond(200, "text/plain", b"ok")
 
-        elif self.path == "/save":
-            dirty = json.loads(body)  # {str(idx): degrees}
-            for idx_str, deg in dirty.items():
-                i   = int(idx_str)
-                deg = int(deg)
-                if deg % 360 == 0 or i >= len(STATE.results):
-                    continue
-                r = STATE.results[i]
-                img = Image.open(r["path"])
-                img = img.rotate(-deg, expand=True)
-                img.save(r["path"], "JPEG", quality=95)
-                r["rotation"] = 0
-            STATE.persist()
-            self._respond(200, "text/plain", b"ok")
+            elif self.path == "/reset":
+                with state._lock:
+                    for r in state.results:
+                        Path(r["path"]).unlink(missing_ok=True)
+                    state.results.clear()
+                    state._persist()
+                self._respond(200, "text/plain", b"ok")
 
-        elif self.path == "/reset":
-            with STATE._lock:
-                for r in STATE.results:
+            elif self.path.startswith("/delete/"):
+                idx = int(self.path.split("/")[-1])
+                if idx < len(state.results):
+                    r = state.results[idx]
                     Path(r["path"]).unlink(missing_ok=True)
-                STATE.results.clear()
-                STATE._persist()
-            self._respond(200, "text/plain", b"ok")
+                    r["deleted"] = True
+                    state.persist()
+                self._respond(200, "text/plain", b"ok")
 
-        elif self.path.startswith("/delete/"):
-            idx = int(self.path.split("/")[-1])
-            if idx < len(STATE.results):
-                r = STATE.results[idx]
-                Path(r["path"]).unlink(missing_ok=True)
-                r["deleted"] = True
-                STATE.persist()
-            self._respond(200, "text/plain", b"ok")
+            elif self.path == "/quit":
+                self._respond(200, "text/plain", b"bye")
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
 
-        elif self.path == "/quit":
-            self._respond(200, "text/plain", b"bye")
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            else:
+                self.send_error(404)
 
-        else:
-            self.send_error(404)
+        def _respond(self, code, content_type, data):
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
 
-    def _respond(self, code, content_type, data):
-        self.send_response(code)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+    return Handler
+
+
+# ── ReviewServer ──────────────────────────────────────────────────────────────
+
+class ReviewServer:
+    def __init__(self, scan_dir, embedded=False):
+        self.scan_dir = Path(scan_dir)
+        self.output_dir = self.scan_dir / "processed"
+        self.results_file = self.output_dir / "results.json"
+        self.embedded = embedded
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.state = AppState(self.output_dir, self.results_file)
+        self.state.load()
+        self._server = None
+        self.port = None
+
+    def auto_process(self):
+        auto_process_folder(self.scan_dir, self.state, self.output_dir)
+
+    def start(self):
+        """Start HTTP server on OS-assigned port in daemon thread."""
+        handler_class = _make_handler(self)
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
+        self._server.sse_clients = set()
+        self.port = self._server.server_address[1]
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        return self.port
+
+    def stop(self):
+        if self._server:
+            self._server.shutdown()
+            self._server = None
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main(scan_dir=None):
-    global SCAN_DIR, OUTPUT_DIR, RESULTS_FILE
+    PORT = 8765
 
     if scan_dir:
-        SCAN_DIR = Path(scan_dir)
-        OUTPUT_DIR = SCAN_DIR / "processed"
-        RESULTS_FILE = OUTPUT_DIR / "results.json"
+        scan_dir = Path(scan_dir)
+        output_dir = scan_dir / "processed"
+        results_file = output_dir / "results.json"
+    else:
+        output_dir = BASE_DIR / "output"
+        results_file = output_dir / "results.json"
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    STATE.load()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    state = AppState(output_dir, results_file)
+    state.load()
 
     # If port is already in use, just open browser to existing instance
     if port_in_use(PORT):
@@ -691,13 +739,23 @@ def main(scan_dir=None):
         return
 
     # Auto-process folder if given
-    if SCAN_DIR:
-        auto_process_folder(SCAN_DIR)
+    if scan_dir:
+        auto_process_folder(scan_dir, state, output_dir)
+
+    # Create a ReviewServer-like object for the handler to reference
+    class _StandaloneCtx:
+        pass
+    ctx = _StandaloneCtx()
+    ctx.state = state
+    ctx.output_dir = output_dir
+    ctx.embedded = False
+
+    handler_class = _make_handler(ctx)
 
     print(f"Scan processor  →  http://127.0.0.1:{PORT}/")
-    print(f"Output folder   →  {OUTPUT_DIR}")
+    print(f"Output folder   →  {output_dir}")
     print("Ctrl-C to quit\n")
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), handler_class)
     server.sse_clients = set()
 
     def watchdog():

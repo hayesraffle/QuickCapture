@@ -754,13 +754,18 @@ class QuickCaptureApp:
         try:
             crops = _crop_document(Image.open(path))
             if crops:
-                self.root.after(0, self._show_crop_success, crop_lbl, crops[0])
+                # save crop alongside originals in processed/ subfolder
+                processed_dir = SAVE_DIR / "processed"
+                processed_dir.mkdir(exist_ok=True)
+                crop_path = processed_dir / f"{Path(path).stem}_crop.jpg"
+                crops[0].save(crop_path, "JPEG", quality=95)
+                self.root.after(0, self._show_crop_success, crop_lbl, crops[0], crop_path)
             else:
                 self.root.after(0, self._show_crop_failed, crop_lbl)
         except Exception:
             self.root.after(0, self._show_crop_failed, crop_lbl)
 
-    def _show_crop_success(self, crop_lbl, crop_img):
+    def _show_crop_success(self, crop_lbl, crop_img, crop_path):
         w, h    = crop_img.size
         thumb_w = max(1, int(THUMB_H * w / h))
         thumb   = crop_img.resize((thumb_w, THUMB_H), Image.LANCZOS)
@@ -772,10 +777,38 @@ class QuickCaptureApp:
         self._thumb_refs.append(photo)
         crop_lbl.configure(image=photo, text="", fg_color="transparent",
                            width=thumb_w, height=THUMB_H)
+        crop_lbl.bind("<Button-1>", lambda e, img=crop_img: self._open_image_popup(img))
 
     def _show_crop_failed(self, crop_lbl):
         crop_lbl.configure(fg_color="#3a1010", text="✗",
                            text_color=RED, font=ctk.CTkFont(size=18))
+
+    def _open_image_popup(self, img):
+        """Show a crop image in a floating window. Click or Escape to close."""
+        popup = ctk.CTkToplevel(self.root)
+        popup.title("Crop Preview")
+        popup.configure(fg_color=BG)
+        popup.attributes("-topmost", True)
+
+        # fit image to 80% of screen
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        max_w, max_h = int(sw * 0.8), int(sh * 0.8)
+        iw, ih = img.size
+        scale  = min(max_w / iw, max_h / ih, 1.0)
+        dw, dh = max(1, int(iw * scale)), max(1, int(ih * scale))
+
+        display = img.resize((dw, dh), Image.LANCZOS)
+        photo   = ctk.CTkImage(display, size=(dw, dh))
+        self._thumb_refs.append(photo)
+
+        lbl = ctk.CTkLabel(popup, image=photo, text="", fg_color=BG)
+        lbl.pack(padx=16, pady=16)
+
+        close = lambda e=None: popup.destroy()
+        popup.bind("<Escape>", close)
+        lbl.bind("<Button-1>", close)
+        popup.geometry(f"{dw + 32}x{dh + 32}")
 
 
 if __name__ == "__main__":

@@ -26,64 +26,7 @@ THUMB_SIZE   = (400, 400)
 
 # ── Detection + perspective correction (Apple Vision) ─────────────────────────
 
-def find_and_extract_documents(pil_img):
-    """Use Apple's VNDetectDocumentSegmentationRequest to find and extract documents."""
-    import numpy as np
-    import cv2
-    import Vision
-    import Quartz
-    from Foundation import NSURL
-    # Write to temp file for Vision framework
-    tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-    try:
-        pil_img.save(tmp.name, 'JPEG', quality=95)
-        url = NSURL.fileURLWithPath_(tmp.name)
-        ci_image = Quartz.CIImage.imageWithContentsOfURL_(url)
-    finally:
-        os.unlink(tmp.name)
-
-    if ci_image is None:
-        return []
-
-    handler = Vision.VNImageRequestHandler.alloc().initWithCIImage_options_(ci_image, None)
-    request = Vision.VNDetectDocumentSegmentationRequest.alloc().init()
-    success, error = handler.performRequests_error_([request], None)
-    if not success:
-        return []
-
-    results = request.results()
-    if not results or len(results) == 0:
-        return []
-
-    obs = results[0]
-    if obs.confidence() < 0.5:
-        return []
-
-    # Get corners (normalized coords, origin bottom-left)
-    tl = obs.topLeft()
-    tr = obs.topRight()
-    br = obs.bottomRight()
-    bl = obs.bottomLeft()
-
-    w, h = pil_img.size
-    corners = np.array([
-        [tl.x * w, (1 - tl.y) * h],
-        [tr.x * w, (1 - tr.y) * h],
-        [br.x * w, (1 - br.y) * h],
-        [bl.x * w, (1 - bl.y) * h],
-    ], dtype=np.float32)
-
-    # Perspective warp
-    cv_img = np.array(pil_img)
-    width = int(max(np.linalg.norm(corners[1] - corners[0]), np.linalg.norm(corners[2] - corners[3])))
-    height = int(max(np.linalg.norm(corners[3] - corners[0]), np.linalg.norm(corners[2] - corners[1])))
-    if width < 50 or height < 50:
-        return []
-
-    dst = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
-    M = cv2.getPerspectiveTransform(corners, dst)
-    warped = cv2.warpPerspective(cv_img, M, (width, height))
-    return [Image.fromarray(warped)]
+from docdetect import detect_and_extract_documents as find_and_extract_documents
 
 # ── State ──────────────────────────────────────────────────────────────────────
 

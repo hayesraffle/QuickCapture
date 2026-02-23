@@ -130,57 +130,7 @@ def _prewarm_crop():
     except Exception:
         pass
 
-def _crop_document(pil_img):
-    """Detect and perspective-correct a document. Returns list of PIL Images."""
-    import numpy as np, cv2, Vision, Quartz, tempfile, os
-    from Foundation import NSURL
-
-    tmp = tempfile.NamedTemporaryFile(suffix='.jpg', delete=False)
-    try:
-        pil_img.save(tmp.name, 'JPEG', quality=95)
-        url      = NSURL.fileURLWithPath_(tmp.name)
-        ci_image = Quartz.CIImage.imageWithContentsOfURL_(url)
-    finally:
-        os.unlink(tmp.name)
-
-    if ci_image is None:
-        return []
-
-    handler = Vision.VNImageRequestHandler.alloc().initWithCIImage_options_(ci_image, None)
-    request = Vision.VNDetectDocumentSegmentationRequest.alloc().init()
-    success, _ = handler.performRequests_error_([request], None)
-    if not success:
-        return []
-
-    results = request.results()
-    if not results or len(results) == 0:
-        return []
-
-    obs = results[0]
-    if obs.confidence() < 0.5:
-        return []
-
-    tl, tr, br, bl = obs.topLeft(), obs.topRight(), obs.bottomRight(), obs.bottomLeft()
-    w, h = pil_img.size
-    corners = np.array([
-        [tl.x * w, (1 - tl.y) * h],
-        [tr.x * w, (1 - tr.y) * h],
-        [br.x * w, (1 - br.y) * h],
-        [bl.x * w, (1 - bl.y) * h],
-    ], dtype=np.float32)
-
-    cv_img = np.array(pil_img)
-    width  = int(max(np.linalg.norm(corners[1] - corners[0]),
-                     np.linalg.norm(corners[2] - corners[3])))
-    height = int(max(np.linalg.norm(corners[3] - corners[0]),
-                     np.linalg.norm(corners[2] - corners[1])))
-    if width < 50 or height < 50:
-        return []
-
-    dst    = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=np.float32)
-    M      = cv2.getPerspectiveTransform(corners, dst)
-    warped = cv2.warpPerspective(cv_img, M, (width, height))
-    return [Image.fromarray(warped)]
+from docdetect import detect_and_extract_documents as _crop_document
 
 
 # ── camera thread ─────────────────────────────────────────────────────────────
@@ -750,16 +700,24 @@ class QuickCaptureApp:
             print(f"Thumb: {e}")
 
     def _do_crop(self, path, crop_lbl):
-        """Background thread: detect document, update crop placeholder on main thread."""
+        """Background thread: detect documents, update crop placeholder on main thread."""
         try:
             crops = _crop_document(Image.open(path))
             if crops:
-                # save crop alongside originals in processed/ subfolder
                 processed_dir = SAVE_DIR / "processed"
                 processed_dir.mkdir(exist_ok=True)
-                crop_path = processed_dir / f"{Path(path).stem}_crop.jpg"
-                crops[0].save(crop_path, "JPEG", quality=95)
-                self.root.after(0, self._show_crop_success, crop_lbl, crops[0], crop_path)
+                crop_pairs = []
+                for idx, crop in enumerate(crops):
+                    suffix = f"_crop{idx+1}" if len(crops) > 1 else "_crop"
+                    crop_path = processed_dir / f"{Path(path).stem}{suffix}.jpg"
+                    crop.save(crop_path, "JPEG", quality=95)
+                    crop_pairs.append((crop, crop_path))
+                # Show first crop in placeholder, append extras
+                self.root.after(0, self._show_crop_success, crop_lbl,
+                                crop_pairs[0][0], crop_pairs[0][1])
+                for crop_img, crop_path in crop_pairs[1:]:
+                    self.root.after(0, self._show_extra_crop,
+                                    crop_lbl, crop_img, crop_path)
             else:
                 self.root.after(0, self._show_crop_failed, crop_lbl)
         except Exception:
@@ -778,6 +736,22 @@ class QuickCaptureApp:
         crop_lbl.configure(image=photo, text="", fg_color="transparent",
                            width=thumb_w, height=THUMB_H)
         crop_lbl.bind("<Button-1>", lambda e, img=crop_img: self._open_image_popup(img))
+
+    def _show_extra_crop(self, ref_lbl, crop_img, crop_path):
+        """Append an additional crop thumbnail next to the reference label."""
+        parent = ref_lbl.master  # the 'pair' frame
+        w, h = crop_img.size
+        thumb_w = max(1, int(THUMB_H * w / h))
+        thumb = crop_img.resize((thumb_w, THUMB_H), Image.LANCZOS)
+        mask = Image.new("L", (thumb_w, THUMB_H), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, thumb_w-1, THUMB_H-1], radius=10, fill=255)
+        thumb.putalpha(mask)
+        photo = ctk.CTkImage(thumb, size=(thumb_w, THUMB_H))
+        self._thumb_refs.append(photo)
+        lbl = ctk.CTkLabel(parent, image=photo, text="", fg_color="transparent")
+        lbl.pack(side="left", padx=(0, 4))
+        lbl.bind("<Button-1>", lambda e, img=crop_img: self._open_image_popup(img))
 
     def _show_crop_failed(self, crop_lbl):
         crop_lbl.configure(fg_color="#3a1010", text="✗",
